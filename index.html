@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Seismic Resonance — Real-Time Earthquake Sonification</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Full-bleed Map Canvas -->
+    <canvas id="map-canvas"></canvas>
+
+    <!-- Tooltip for hovered earthquake -->
+    <div id="map-tooltip" class="tooltip hidden"></div>
+
+    <!-- Top Header Bar -->
+    <header class="top-bar">
+      <div class="brand glass">
+        <div>
+          <h1>SEISMIC RESONANCE</h1>
+          <p class="subtitle">Real-Time USGS Earthquake Sonification · Sub-Bass Engine</p>
+        </div>
+        <button id="btn-readme" class="brand-help-btn" type="button" title="About &amp; README" aria-label="Open README and project info" aria-expanded="false" aria-controls="readme-modal-backdrop">?</button>
+      </div>
+
+      <div class="header-stats glass">
+        <div class="stat-pill">
+          <div class="brand-pulse" id="live-indicator"></div>
+          <span class="stat-label">FEED</span>
+          <span class="stat-value" id="stat-feed-status">Connecting…</span>
+          <span class="stat-audio-icon" aria-hidden="true">
+            <svg class="btn-audio-icon btn-audio-icon-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+              <line x1="23" y1="9" x2="17" y2="15"></line>
+              <line x1="17" y1="9" x2="23" y2="15"></line>
+            </svg>
+            <svg class="btn-audio-icon btn-audio-icon-active" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+            </svg>
+          </span>
+        </div>
+        <div class="stat-pill stat-pill-summary">
+          <span class="stat-label">DT</span>
+          <span class="stat-value stat-count mono" id="stat-datetime">-- --- --:-- ---</span>
+          <span class="stat-sep" aria-hidden="true">|</span>
+          <span class="stat-label" id="stat-dataset-label">PAST</span>
+          <span class="stat-value stat-count mono" id="stat-dataset-value">24H (All)</span>
+          <span class="stat-sep" aria-hidden="true">|</span>
+          <span class="stat-label">EVENTS</span>
+          <span class="stat-value stat-count mono" id="stat-event-count">0</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Left Panel: Controls -->
+    <aside class="panel-left glass">
+      <div class="panel-section">
+        <div class="section-header">
+          <h2>SEISMIC FEED</h2>
+        </div>
+
+        <label class="field">
+          <span>USGS Dataset</span>
+          <select id="select-feed">
+            <option value="all_hour">Past Hour (All Quakes)</option>
+            <option value="all_day" selected>Past 24 Hours (All Quakes)</option>
+            <option value="2.5_day">Past 24 Hours (M2.5+)</option>
+            <option value="4.5_week">Past 7 Days (M4.5+)</option>
+          </select>
+        </label>
+
+        <div class="field">
+          <span>Playback Mode</span>
+          <div class="segmented" id="mode-toggle">
+            <button type="button" data-mode="stream" class="active">Time-Lapse Stream</button>
+            <button type="button" data-mode="live">Live Only</button>
+          </div>
+        </div>
+
+        <div class="field" id="speed-field">
+          <div class="field-row">
+            <label for="range-speed">Stream Speed</label>
+            <span class="mono val-badge" id="val-speed">360× | 1 min = 6h</span>
+          </div>
+          <input type="range" id="range-speed" min="1" max="4" step="1" value="3" />
+          <div class="range-labels">
+            <span>60×</span>
+            <span>180×</span>
+            <span>360×</span>
+            <span>900×</span>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-row">
+            <label for="range-min-mag">Min Magnitude</label>
+            <span class="mono val-badge" id="val-min-mag">M0.0+</span>
+          </div>
+          <input type="range" id="range-min-mag" min="0" max="5" step="0.5" value="0" />
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-header">
+          <h2>LOW-FREQUENCY SYNTH</h2>
+        </div>
+
+        <label class="field">
+          <span>Voice Timbre</span>
+          <select id="select-timbre">
+            <option value="tectonic" selected>Tectonic Rumble (Sub + Noise)</option>
+            <option value="subpulse">Sub-Bass Pulse (Pure Deep)</option>
+            <option value="abyssal">Abyssal Pad (Slow Swell)</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Harmonic Scale</span>
+          <select id="select-scale">
+            <option value="dorian" selected>Deep Dorian</option>
+            <option value="phrygian">Phrygian Dominant</option>
+            <option value="pentatonic">Minor Pentatonic</option>
+            <option value="just">Just Intonation Drone</option>
+          </select>
+        </label>
+
+        <div class="field">
+          <div class="field-row">
+            <label for="range-root-freq">Root Frequency</label>
+            <span class="mono val-badge" id="val-root-freq">36.7 Hz (D1)</span>
+          </div>
+          <input type="range" id="range-root-freq" min="27.5" max="65.4" step="0.1" value="36.7" />
+        </div>
+
+        <div class="field">
+          <div class="field-row">
+            <label for="range-volume">Master Volume</label>
+            <span class="mono val-badge" id="val-volume">80%</span>
+          </div>
+          <input type="range" id="range-volume" min="0" max="100" step="1" value="80" />
+        </div>
+
+        <div class="toggle-row">
+          <span>Earth Drone (41 Hz Hum)</span>
+          <label class="switch">
+            <input type="checkbox" id="toggle-drone" />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="toggle-row">
+          <span>Show Tectonic Plates</span>
+          <label class="switch">
+            <input type="checkbox" id="toggle-plates" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="panel-footer">
+        <button id="btn-trigger-latest" class="btn-secondary">Audition Latest Quake</button>
+        <p class="hint">Click any quake on the map to play it · Shift+Click anywhere to test a synthetic tremor.</p>
+      </div>
+    </aside>
+
+    <!-- Right Panel: Live Event Log -->
+    <aside class="panel-right glass">
+      <div class="panel-right-header">
+        <div class="section-header">
+          <h2>RECENT SEISMIC EVENTS &amp; DEPTHS</h2>
+        </div>
+        <div class="panel-legend" aria-label="Earthquake Depth Scale (km)">
+          <canvas id="depth-legend-canvas"></canvas>
+        </div>
+      </div>
+      <div id="event-list" class="event-list">
+        <div class="empty-state">Loading USGS seismic feed…</div>
+      </div>
+      <div id="hud-event-list" class="hud-event-list" aria-live="polite"></div>
+    </aside>
+
+    <!-- Time-of-Day Radial Dial (1200 vertically aligned with Sun) -->
+    <section class="solar-dial-bar glass" aria-label="Local Solar Time Dial">
+      <canvas id="solar-dial-canvas"></canvas>
+      <div id="solar-dial-readout" class="solar-dial-readout mono hidden"></div>
+    </section>
+
+    <!-- Local Time Zone Map Overlay Pill -->
+    <div id="map-tz-pill" class="stat-pill map-tz-pill glass" aria-live="polite">
+      <span class="stat-label">DT</span>
+      <span class="stat-value stat-count mono" id="map-local-datetime">-- --- --:-- ---</span>
+    </div>
+
+    <!-- Bottom Bar: Sub-Bass Stereo Spectrum & Audio Control -->
+    <footer class="bottom-bar">
+      <button id="btn-reset-zoom" class="btn-ghost bottom-zoom-btn" title="Reset map pan and zoom" aria-label="Reset map pan and zoom">
+        <svg class="btn-zoom-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+          <path d="M3 3v5h5"></path>
+        </svg>
+        <span class="btn-zoom-label">Zoom</span>
+      </button>
+      <div class="bottom-bar-half bottom-bar-left glass">
+        <canvas id="audio-canvas-left" class="audio-canvas"></canvas>
+      </div>
+      <button id="btn-audio-toggle" class="btn-primary bottom-audio-btn" title="Start Audio" aria-label="Start Audio">
+        <svg class="btn-audio-icon btn-audio-icon-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <line x1="23" y1="9" x2="17" y2="15"></line>
+          <line x1="17" y1="9" x2="23" y2="15"></line>
+        </svg>
+        <svg class="btn-audio-icon btn-audio-icon-active" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+        </svg>
+      </button>
+      <div class="bottom-bar-half bottom-bar-right glass">
+        <canvas id="audio-canvas-right" class="audio-canvas"></canvas>
+      </div>
+    </footer>
+
+    <!-- README / About Modal -->
+    <div id="readme-modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="readme-modal-title">
+      <div class="readme-modal glass" role="document">
+        <div class="readme-modal-header">
+          <div>
+            <h2 id="readme-modal-title">SEISMIC RESONANCE</h2>
+            <p class="readme-modal-subtitle">Real-Time Earthquake Sonification · README</p>
+          </div>
+          <button id="btn-readme-close" class="readme-close-btn" type="button" title="Close (Esc)" aria-label="Close README modal">&times;</button>
+        </div>
+        <div class="readme-modal-body">
+          <section class="readme-section">
+            <h3>Inspiration &amp; Credits</h3>
+            <ul class="readme-list">
+              <li>
+                <strong>Inspiration:</strong> Inspired by Google DeepMind's
+                <a href="https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/" target="_blank" rel="noopener noreferrer">Introducing Gemini 4 Hydrogen</a>
+                announcement and the real-time global phenomenon sonification example shown in
+                <a href="https://youtu.be/wRdIl5dnqUY" target="_blank" rel="noopener noreferrer">this YouTube video</a>.
+              </li>
+              <li>
+                <strong>Built With:</strong>
+                <a href="https://antigravity.google/" target="_blank" rel="noopener noreferrer">Google Antigravity</a>
+                was used to build this web application.
+              </li>
+              <li>
+                <strong>Data Sources:</strong> Live earthquake data from the
+                <a href="https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php" target="_blank" rel="noopener noreferrer">USGS Earthquake Hazards Program</a>
+                GeoJSON feeds, paired with world landmass and tectonic plate boundary datasets.
+              </li>
+            </ul>
+          </section>
+
+          <section class="readme-section">
+            <h3>What This Web App Is</h3>
+            <p>
+              <strong>Seismic Resonance</strong> transforms global tectonic activity into a tactile, spatial low-frequency soundscape (24 Hz–420 Hz, visualized on a 20 Hz–450 Hz stereo spectrum). As earthquakes occur—or replay in a continuous time-lapse stream—each tremor is rendered as an expanding seismic wave on a full-bleed world map and synthesized in real time using a custom Web Audio sub-bass engine.
+            </p>
+          </section>
+
+          <section class="readme-section">
+            <h3>Key Features &amp; Sonification Mapping</h3>
+            <ul class="readme-list">
+              <li><strong>Live USGS Seismic Feeds:</strong> Switch between <em>Past Hour (All)</em>, <em>Past 24 Hours (All)</em>, <em>Past 24 Hours (M2.5+)</em>, and <em>Past 7 Days (M4.5+)</em>, with automatic polling every 30 seconds.</li>
+              <li><strong>Time-Lapse Stream &amp; Live Mode:</strong> Replay recent global activity at <code>60×</code>, <code>180×</code>, <code>360×</code>, or <code>900×</code> speed, or switch to <em>Live Only</em> to listen strictly for newly arriving earthquakes.</li>
+              <li><strong>Low-Frequency Sub-Bass Synth:</strong> Choose between <em>Tectonic Rumble</em>, <em>Sub-Bass Pulse</em>, and <em>Abyssal Pad</em> timbres across four harmonic scales (<em>Deep Dorian</em>, <em>Phrygian Dominant</em>, <em>Minor Pentatonic</em>, <em>Just Intonation Drone</em>), with adjustable root frequency (<code>27.5–65.4 Hz</code>) and an optional continuous <strong>41 Hz Earth Drone</strong>.</li>
+              <li><strong>Spatial &amp; Depth Mapping:</strong> Depth is color-coded—Shallow (<code>&lt; 70 km</code>, Magma Coral), Mid (<code>70–300 km</code>, Amber Gold), and Deep (<code>≥ 300 km</code>, Abyssal Cyan)—and mapped to pitch/envelope, while longitude pans across the stereo field into dual L/R spectrum analyzers.</li>
+              <li><strong>Interactive Map:</strong> Pan and zoom across the globe, toggle tectonic plate boundaries, click any quake to audition its sound, or <code>Shift + Click</code> anywhere on the map to trigger a synthetic tremor.</li>
+            </ul>
+          </section>
+
+          <section class="readme-section">
+            <h3>Running Locally</h3>
+            <p>Start the built-in Python development server or run the verification suite:</p>
+            <pre class="readme-code"><code>python local.py
+python local.py --test</code></pre>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
