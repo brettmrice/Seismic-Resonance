@@ -260,6 +260,7 @@ export class SeismicMap {
     this.lastMouseX = 0;
     this.lastMouseY = 0;
     this.lastUserNavTime = -Infinity;
+    this._manualNavHold = false;
     this.autoCenterLon = null;
     this._autoTransitionActive = false;
     this._transStartTime = 0;
@@ -275,9 +276,12 @@ export class SeismicMap {
 
     // Continuous critically-damped auto-follow state
     this._autoFollowActive = false;
+    this._autoZoomEnabled = false;
     this._autoFollowTargetLon = 0;
     this._autoFollowTargetLat = 0;
+    this._autoFollowTargetZoom = 1;
     this._autoFollowSmoothTime = 1.4;
+    this._transTargetZoom = 1;
     this._lastAutoCamTime = null;
     this._camVelLon = 0;
     this._camVelLat = 0;
@@ -978,7 +982,13 @@ export class SeismicMap {
   }
 
   canAutoTransition(now = performance.now()) {
-    return !this.isDragging && !this._morphActive && now - this.lastUserNavTime >= 5000 && this.baseRadius > 0;
+    return (
+      !this.isDragging &&
+      !this._morphActive &&
+      !this._manualNavHold &&
+      now - this.lastUserNavTime >= 5000 &&
+      this.baseRadius > 0
+    );
   }
 
   _resetAutoCameraVelocities() {
@@ -1013,13 +1023,26 @@ export class SeismicMap {
     }
   }
 
-  setAutoCenterTarget(lon, lat = 0, smoothTimeSec = 1.4) {
+  setAutoZoomEnabled(enabled) {
+    const next = Boolean(enabled);
+    if (this._autoZoomEnabled === next) return;
+    this._autoZoomEnabled = next;
+    if (!next) {
+      this._autoFollowTargetZoom = 1;
+      this._transTargetZoom = 1;
+    }
+  }
+
+  setAutoCenterTarget(lon, lat = 0, smoothTimeSec = 1.4, targetZoom = 1) {
     if (!Number.isFinite(lon)) return;
     const targetLon = normalizeLon(lon);
     const targetLat = Number.isFinite(lat) ? Math.max(-85, Math.min(85, lat)) : 0;
     this.autoCenterLon = targetLon;
     this._autoFollowTargetLon = targetLon;
     this._autoFollowTargetLat = targetLat;
+    this._autoFollowTargetZoom = this._autoZoomEnabled && Number.isFinite(targetZoom)
+      ? Math.max(0.5, Math.min(10, targetZoom))
+      : 1;
     this._autoFollowSmoothTime = Math.max(0.15, smoothTimeSec);
     this._autoFollowActive = true;
     this._autoTransitionActive = false;
@@ -1030,7 +1053,7 @@ export class SeismicMap {
     this._resetAutoCameraVelocities();
   }
 
-  setAutoCenterLon(lon, durationMs = 600, lat = null) {
+  setAutoCenterLon(lon, durationMs = 600, lat = null, targetZoom = 1) {
     if (!Number.isFinite(lon)) return;
     this.autoCenterLon = lon;
     this._autoFollowActive = false;
@@ -1041,6 +1064,9 @@ export class SeismicMap {
       this._transStartTime = now;
       this._transDuration = Math.max(80, durationMs);
       this._transStartZoom = this.zoom;
+      this._transTargetZoom = this._autoZoomEnabled && Number.isFinite(targetZoom)
+        ? Math.max(0.5, Math.min(10, targetZoom))
+        : 1;
 
       if (this.mapMode === '3d') {
         this._transStartLon = this.rotLon;
@@ -1061,15 +1087,26 @@ export class SeismicMap {
     }
   }
 
-  resetView() {
+  resetView({ preservePosition = false } = {}) {
+    const prevZoom = this.zoom || 1;
     this.zoom = 1;
-    this.panX = 0;
-    this.panY = 0;
     this.tilt2D = 0;
     this.yaw2D = 0;
-    this.rotLon = 0;
-    this.rotLat = 0;
-    this.lastUserNavTime = performance.now();
+    if (preservePosition) {
+      if (prevZoom !== 1) {
+        this.panX /= prevZoom;
+        this.panY /= prevZoom;
+      }
+      this._clampPan();
+      this._clampRotation();
+    } else {
+      this.panX = 0;
+      this.panY = 0;
+      this.rotLon = 0;
+      this.rotLat = 0;
+    }
+    this.lastUserNavTime = -Infinity;
+    this._manualNavHold = false;
     this._autoTransitionActive = false;
     this._autoFollowActive = false;
     this._resetAutoCameraVelocities();
@@ -1289,6 +1326,8 @@ export class SeismicMap {
         this.panX = mx - this.cx - (mx - this.cx - this.panX) * scaleRatio;
         this.panY = my - this.cy - (my - this.cy - this.panY) * scaleRatio;
         this.zoom = newZoom;
+        this._manualNavHold = true;
+        this._autoFollowActive = false;
         this._clampPan();
         this.onZoomChange?.(this.zoom);
       } else {
@@ -1297,6 +1336,8 @@ export class SeismicMap {
         if (newZoom === this.zoom) return;
 
         this.zoom = newZoom;
+        this._manualNavHold = true;
+        this._autoFollowActive = false;
         this.onZoomChange?.(this.zoom);
       }
     }, { passive: false });
@@ -1317,7 +1358,9 @@ export class SeismicMap {
       if (Math.hypot(dx, dy) > 3) {
         this.dragMoved = true;
         this.lastUserNavTime = performance.now();
+        this._manualNavHold = true;
         this._autoTransitionActive = false;
+        this._autoFollowActive = false;
       }
 
       if (this.mapMode === '2d') {
@@ -1457,15 +1500,19 @@ export class SeismicMap {
         : 1 / 60;
       this._lastAutoCamTime = now;
 
-      if (this.zoom > 1.005) {
+      const targetZoom = this._autoZoomEnabled ? this._autoFollowTargetZoom : 1;
+      if (Math.abs(this.zoom - targetZoom) > 0.003) {
         const [nextZoom, nextZoomVel] = smoothDamp(
-          this.zoom, 1, this._camVelZoom, this._autoFollowSmoothTime * 0.85, dt
+          this.zoom, targetZoom, this._camVelZoom, this._autoFollowSmoothTime * 0.95, dt
         );
-        this.zoom = Math.max(1, nextZoom);
+        this.zoom = Math.max(0.5, Math.min(10, nextZoom));
         this._camVelZoom = nextZoomVel;
         this.onZoomChange?.(this.zoom);
       } else {
-        this.zoom = 1;
+        if (this.zoom !== targetZoom) {
+          this.zoom = targetZoom;
+          this.onZoomChange?.(this.zoom);
+        }
         this._camVelZoom = 0;
       }
 
@@ -1507,14 +1554,31 @@ export class SeismicMap {
       return;
     }
 
+    if (!this._autoTransitionActive) {
+      if (!this._autoZoomEnabled && Math.abs(this.zoom - 1) > 0.003 && this.canAutoTransition(now)) {
+        const dt = this._lastAutoCamTime !== null
+          ? Math.min(0.1, Math.max(0.001, (now - this._lastAutoCamTime) / 1000))
+          : 1 / 60;
+        this._lastAutoCamTime = now;
+        const [nextZoom, nextZoomVel] = smoothDamp(
+          this.zoom, 1, this._camVelZoom, 0.45, dt
+        );
+        this.zoom = Math.abs(nextZoom - 1) <= 0.003 ? 1 : Math.max(0.5, Math.min(10, nextZoom));
+        this._camVelZoom = this.zoom === 1 ? 0 : nextZoomVel;
+        this.onZoomChange?.(this.zoom);
+      } else {
+        this._lastAutoCamTime = null;
+      }
+      return;
+    }
     this._lastAutoCamTime = null;
-    if (!this._autoTransitionActive) return;
 
     const elapsed = now - this._transStartTime;
     const t = Math.min(1, Math.max(0, elapsed / this._transDuration));
     const eased = easeInOutCubic(t);
 
-    this.zoom = this._transStartZoom + (1 - this._transStartZoom) * eased;
+    const targetZoom = this._autoZoomEnabled ? this._transTargetZoom : 1;
+    this.zoom = this._transStartZoom + (targetZoom - this._transStartZoom) * eased;
     if (this.mapMode === '3d') {
       this.rotLon = normalizeLon(this._transStartLon + this._transDeltaLon * eased);
       this.rotLat = this._transStartLat + this._transDeltaLat * eased;

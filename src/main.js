@@ -10,7 +10,8 @@ import { SeismicRecorder, RESOLUTION_PRESETS, encodeWavBlob } from './recorder.j
 
 const SPEED_OPTIONS = [60, 180, 360, 480, 900];
 const POLL_INTERVAL_MS = 30000;
-const ASIDE_IDLE_MS = 5000;
+const ASIDE_IDLE_MS = 10000;
+const TOP_BAR_IDLE_MS = 10000;
 const HUD_CARD_LINGER_MS = 1500;
 const HUD_CARD_FADE_MS = 650;
 const DATASET_WINDOW_LABELS = {
@@ -324,7 +325,7 @@ class App {
     this.rangeVolume.addEventListener('change', onVolumeChange);
 
     this.btnResetZoom?.addEventListener('click', () => {
-      this.map.resetView();
+      this._resetViewToCurrentPosition();
     });
 
     this.mapModeToggle?.querySelectorAll('button[data-map-mode]').forEach((btn) => {
@@ -419,25 +420,63 @@ class App {
   }
 
   /**
-   * Slides the left and right aside panels out after ASIDE_IDLE_MS of no mouse
-   * interactions, and slides them back in as soon as the mouse interacts.
+   * Slides the left and right aside panels out after ASIDE_IDLE_MS of no page/mouse
+   * interaction, then slides the top bar up and out after an additional
+   * TOP_BAR_IDLE_MS of inactivity, restoring both on the next interaction.
    */
   _initIdleAsides() {
     this._idleTimer = null;
+    this._topBarIdleTimer = null;
     const resetIdleTimer = () => {
-      document.body.classList.remove('asides-hidden');
+      if (this.cleanUI) return;
+      document.body.classList.remove('asides-hidden', 'top-bar-hidden');
+      this.map?.setAutoZoomEnabled(false);
       if (this._idleTimer !== null) {
         clearTimeout(this._idleTimer);
       }
+      if (this._topBarIdleTimer !== null) {
+        clearTimeout(this._topBarIdleTimer);
+        this._topBarIdleTimer = null;
+      }
       this._idleTimer = setTimeout(() => {
-        if (!this.isPaused) {
+        if (!this.isPaused && !this.cleanUI) {
           document.body.classList.add('asides-hidden');
+          if (this.map?._manualNavHold || Math.abs((this.map?.zoom ?? 1) - 1) > 0.01) {
+            this._resetViewToCurrentPosition();
+          }
+          this._topBarIdleTimer = setTimeout(() => {
+            if (!this.isPaused && !this.cleanUI) {
+              document.body.classList.add('top-bar-hidden');
+              this.map?.setAutoZoomEnabled(true);
+              if (this.map?.canAutoTransition()) {
+                if (this.mode === 'stream') {
+                  this._updateStreamAutoCenter();
+                } else if (this.filteredQuakes.length > 0) {
+                  const selected = this.map.selectedQuakeId
+                    ? this.filteredQuakes.find((q) => q.id === this.map.selectedQuakeId)
+                    : null;
+                  const currentQuake = selected || this.filteredQuakes[this.filteredQuakes.length - 1];
+                  this._updateAutoCenterForQuake(currentQuake, 900);
+                }
+              }
+            }
+          }, TOP_BAR_IDLE_MS);
         }
       }, ASIDE_IDLE_MS);
     };
 
-    const mouseEvents = ['mousemove', 'mousedown', 'mouseup', 'wheel', 'click', 'pointermove', 'pointerdown'];
-    for (const evt of mouseEvents) {
+    const interactionEvents = [
+      'mousemove',
+      'mousedown',
+      'mouseup',
+      'wheel',
+      'click',
+      'pointermove',
+      'pointerdown',
+      'touchstart',
+      'keydown',
+    ];
+    for (const evt of interactionEvents) {
       window.addEventListener(evt, resetIdleTimer, { passive: true });
     }
 
@@ -708,6 +747,32 @@ class App {
     return Math.pow(10, 0.5 * (mag - 2.5));
   }
 
+  _resetViewToCurrentPosition() {
+    if (this.filteredQuakes.length > 0) {
+      this.map.resetView({ preservePosition: true });
+      if (this.mode === 'stream') {
+        this._updateStreamAutoCenter();
+      } else {
+        const selected = this.map.selectedQuakeId
+          ? this.filteredQuakes.find((q) => q.id === this.map.selectedQuakeId)
+          : null;
+        const currentQuake = selected || this.filteredQuakes[this.filteredQuakes.length - 1];
+        this._updateAutoCenterForQuake(currentQuake, 600);
+      }
+    } else {
+      this.map.resetView();
+    }
+  }
+
+  _magToAutoZoom(mag) {
+    // Zoom in on low magnitudes (~1.75x at M1.0) and zoom out on high magnitudes (~0.78x at M7.5+)
+    const m = Number.isFinite(mag) ? mag : 4.5;
+    const t = Math.max(0, Math.min(1, (m - 1.0) / 6.5));
+    const minZoom = 0.78;
+    const maxZoom = 1.75;
+    return maxZoom * Math.pow(minZoom / maxZoom, t);
+  }
+
   _updateAutoCenterForQuake(quake, durationMs = 300) {
     if (!quake) return;
     const list = this.filteredQuakes;
@@ -722,6 +787,8 @@ class App {
     let sx = 0;
     let sy = 0;
     let sz = 0;
+    let magNum = 0;
+    let magDen = 0;
     for (const q of windowQuakes) {
       const w = this._quakePullWeight(q);
       const lonRad = (q.lon || 0) * DEG2RAD;
@@ -730,10 +797,14 @@ class App {
       sx += w * cosLat * Math.cos(lonRad);
       sy += w * cosLat * Math.sin(lonRad);
       sz += w * Math.sin(latRad);
+      magNum += w * Math.max(0, q.mag ?? 2.5);
+      magDen += w;
     }
     const avgLon = Math.atan2(sy, sx) / DEG2RAD;
     const avgLat = Math.atan2(sz, Math.hypot(sx, sy)) / DEG2RAD;
-    this.map.setAutoCenterLon(avgLon, durationMs, avgLat);
+    const effectiveMag = magDen > 0 ? magNum / magDen : (quake.mag ?? 2.5);
+    const targetZoom = this._magToAutoZoom(effectiveMag);
+    this.map.setAutoCenterLon(avgLon, durationMs, avgLat, targetZoom);
   }
 
   _updateStreamAutoCenter() {
@@ -785,17 +856,18 @@ class App {
     }
 
     const effectiveMag = magDen > 0 ? magNum / magDen : 2.5;
+    const targetZoom = this._magToAutoZoom(effectiveMag);
     const pullBoost = Math.max(0, Math.min(1, (effectiveMag - 3.5) / 4.5));
     const smoothTimeSec = 1.45 - 0.55 * pullBoost;
 
     if (Math.hypot(sx, sy, sz) > 1e-4) {
       const avgLon = Math.atan2(sy, sx) / DEG2RAD;
       const avgLat = Math.atan2(sz, Math.hypot(sx, sy)) / DEG2RAD;
-      this.map.setAutoCenterTarget(avgLon, avgLat, smoothTimeSec);
+      this.map.setAutoCenterTarget(avgLon, avgLat, smoothTimeSec, targetZoom);
     } else if (nextQuake) {
-      this.map.setAutoCenterTarget(nextQuake.lon, nextQuake.lat, smoothTimeSec);
+      this.map.setAutoCenterTarget(nextQuake.lon, nextQuake.lat, smoothTimeSec, targetZoom);
     } else if (prevQuake) {
-      this.map.setAutoCenterTarget(prevQuake.lon, prevQuake.lat, smoothTimeSec);
+      this.map.setAutoCenterTarget(prevQuake.lon, prevQuake.lat, smoothTimeSec, targetZoom);
     }
   }
 

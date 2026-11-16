@@ -74,6 +74,17 @@ html, body {
   gap: 16px;
   z-index: 20;
   pointer-events: none;
+  transition: transform 0.45s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.45s ease;
+}
+
+body.top-bar-hidden .top-bar {
+  transform: translateY(calc(-100% - 28px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.top-bar-hidden .top-bar * {
+  pointer-events: none;
 }
 
 .top-bar-left {
@@ -623,6 +634,26 @@ body.asides-hidden .panel-right {
   padding: 0;
   bottom: auto;
   max-height: calc(100vh - 98px);
+}
+
+body.asides-hidden.top-bar-hidden .panel-right {
+  transform: translateY(-70px);
+  max-height: calc(100vh - 28px);
+}
+
+body.top-bar-hidden .panel-right-header > div:nth-child(1),
+body.top-bar-hidden .panel-right-header > div:nth-child(2) {
+  display: none;
+}
+
+body.top-bar-hidden .panel-right-header {
+  width: fit-content;
+  max-width: 100%;
+  align-self: flex-end;
+}
+
+body.top-bar-hidden #stat-datetime {
+  white-space: nowrap;
 }
 
 body.asides-hidden .panel-right-header {
