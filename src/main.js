@@ -106,6 +106,9 @@ class App {
     this.hudCardsById = new Map();
     this.lastFrameTime = performance.now();
     this.isPaused = false;
+    this.isStreamPaused = false;
+    this.isReadmeOpen = false;
+    this._prePauseFeedStatus = null;
     this.pauseStartedAt = 0;
     this.wasAudioRunning = false;
     this._rafId = null;
@@ -176,6 +179,7 @@ class App {
     this.btnResetZoom = document.getElementById('btn-reset-zoom');
     this.mapModeToggle = document.getElementById('map-mode-toggle');
 
+    this.btnStreamToggle = document.getElementById('btn-stream-toggle');
     this.btnReadme = document.getElementById('btn-readme');
     this.readmeBackdrop = document.getElementById('readme-modal-backdrop');
     this.btnReadmeClose = document.getElementById('btn-readme-close');
@@ -238,12 +242,20 @@ class App {
         this.btnAudio.setAttribute('aria-label', 'Mute Audio');
         this.liveIndicator.classList.add('live');
 
-        // Immediately audition the most recent quake on activation
-        if (this.filteredQuakes.length > 0) {
+        if (this.isPaused && this.audio.ctx && this.audio.ctx.state === 'running') {
+          this.wasAudioRunning = true;
+          try {
+            await this.audio.ctx.suspend();
+          } catch {
+            // Ignore suspend errors
+          }
+        } else if (!this.isPaused && this.filteredQuakes.length > 0) {
+          // Immediately audition the most recent quake on activation
           this.triggerEvent(this.filteredQuakes[this.filteredQuakes.length - 1]);
         }
       } else {
         this.audio.setEnabled(false);
+        this.wasAudioRunning = false;
         document.body.classList.remove('audio-active');
         this.btnAudio.classList.remove('active');
         this.btnAudio.title = 'Start Audio';
@@ -379,6 +391,10 @@ class App {
       }
     });
 
+    this.btnStreamToggle?.addEventListener('click', () => {
+      this.toggleStreamActive();
+    });
+
     this.btnReadme?.addEventListener('click', () => {
       this.openReadmeModal();
     });
@@ -394,7 +410,7 @@ class App {
     });
 
     window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.isPaused) {
+      if (e.key === 'Escape' && this.isReadmeOpen) {
         this.closeReadmeModal();
       }
     });
@@ -483,7 +499,7 @@ class App {
     resetIdleTimer();
   }
 
-  async openReadmeModal() {
+  async _enterPausedState() {
     if (this.isPaused) return;
     this.isPaused = true;
     this.pauseStartedAt = performance.now();
@@ -503,22 +519,11 @@ class App {
     } else {
       this.wasAudioRunning = false;
     }
-
-    if (this.readmeBackdrop) {
-      this.readmeBackdrop.classList.remove('hidden');
-    }
-    this.btnReadme?.setAttribute('aria-expanded', 'true');
-    this.btnReadmeClose?.focus();
   }
 
-  async closeReadmeModal() {
+  async _exitPausedState() {
     if (!this.isPaused) return;
     this.isPaused = false;
-
-    if (this.readmeBackdrop) {
-      this.readmeBackdrop.classList.add('hidden');
-    }
-    this.btnReadme?.setAttribute('aria-expanded', 'false');
 
     const pauseDelta = performance.now() - this.pauseStartedAt;
     this.lastFrameTime = performance.now();
@@ -540,6 +545,68 @@ class App {
     this.wasAudioRunning = false;
 
     this._rafId = requestAnimationFrame((t) => this._loop(t));
+  }
+
+  async _syncPausedState() {
+    const shouldPause = this.isStreamPaused || this.isReadmeOpen || Boolean(this._offlineRender?.active);
+    if (shouldPause && !this.isPaused) {
+      await this._enterPausedState();
+    } else if (!shouldPause && this.isPaused) {
+      await this._exitPausedState();
+    }
+  }
+
+  _syncStreamToggleUI() {
+    const paused = this.isStreamPaused;
+    if (this.btnStreamToggle) {
+      this.btnStreamToggle.classList.toggle('paused', paused);
+      this.btnStreamToggle.setAttribute('aria-pressed', paused ? 'true' : 'false');
+      const label = paused ? 'Resume Live / Stream' : 'Pause Live / Stream';
+      this.btnStreamToggle.title = label;
+      this.btnStreamToggle.setAttribute('aria-label', label);
+    }
+    this.liveIndicator?.classList.toggle('paused', paused);
+    if (this.statFeedStatus) {
+      if (paused) {
+        if (this.statFeedStatus.textContent !== 'Paused') {
+          this._prePauseFeedStatus = this.statFeedStatus.textContent;
+          this.statFeedStatus.textContent = 'Paused';
+        }
+      } else if (this.statFeedStatus.textContent === 'Paused' && this._prePauseFeedStatus) {
+        this.statFeedStatus.textContent = this._prePauseFeedStatus;
+        this._prePauseFeedStatus = null;
+      }
+    }
+  }
+
+  async toggleStreamActive() {
+    this.isStreamPaused = !this.isStreamPaused;
+    this._syncStreamToggleUI();
+    await this._syncPausedState();
+  }
+
+  async openReadmeModal() {
+    if (this.isReadmeOpen) return;
+    this.isReadmeOpen = true;
+    await this._syncPausedState();
+
+    if (this.readmeBackdrop) {
+      this.readmeBackdrop.classList.remove('hidden');
+    }
+    this.btnReadme?.setAttribute('aria-expanded', 'true');
+    this.btnReadmeClose?.focus();
+  }
+
+  async closeReadmeModal() {
+    if (!this.isReadmeOpen) return;
+    this.isReadmeOpen = false;
+
+    if (this.readmeBackdrop) {
+      this.readmeBackdrop.classList.add('hidden');
+    }
+    this.btnReadme?.setAttribute('aria-expanded', 'false');
+
+    await this._syncPausedState();
     this.btnReadme?.focus();
   }
 

@@ -563,33 +563,9 @@ export class SeismicMap {
 
   _buildSunReticle() {
     const c = document.createElement('canvas');
-    c.width = 256;
+    c.width = 64;
     c.height = 64;
-    this._sunLabelCanvas = c;
-    this._sunLabelCtx = c.getContext('2d');
-    this._sunLabelTex = new THREE.CanvasTexture(c);
-    this._lastSunHemi = null;
-    this._updateSunReticleTexture(0);
-
-    const mat = new THREE.SpriteMaterial({
-      map: this._sunLabelTex,
-      transparent: true,
-      depthWrite: false,
-      depthTest: true,
-      opacity: 0.85,
-    });
-    this._sunSprite = new THREE.Sprite(mat);
-    this._sunSprite.renderOrder = 4;
-    this.scene.add(this._sunSprite);
-  }
-
-  _updateSunReticleTexture(sunLat) {
-    const hemi = sunLat >= 0 ? 'N. SUMMER' : 'S. SUMMER';
-    if (this._lastSunHemi === hemi) return;
-    this._lastSunHemi = hemi;
-
-    const ctx = this._sunLabelCtx;
-    ctx.clearRect(0, 0, 256, 64);
+    const ctx = c.getContext('2d');
 
     const grad = ctx.createRadialGradient(32, 32, 2, 32, 32, 28);
     grad.addColorStop(0, 'rgba(255, 232, 160, 0.75)');
@@ -606,11 +582,18 @@ export class SeismicMap {
     ctx.arc(32, 32, 8, 0, Math.PI * 2);
     ctx.stroke();
 
-    ctx.fillStyle = 'rgba(255, 224, 130, 0.85)';
-    ctx.font = '600 18px "JetBrains Mono", monospace';
-    ctx.fillText(`☀ ${hemi}`, 48, 38);
+    this._sunLabelTex = new THREE.CanvasTexture(c);
 
-    this._sunLabelTex.needsUpdate = true;
+    const mat = new THREE.SpriteMaterial({
+      map: this._sunLabelTex,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      opacity: 0.85,
+    });
+    this._sunSprite = new THREE.Sprite(mat);
+    this._sunSprite.renderOrder = 4;
+    this.scene.add(this._sunSprite);
   }
 
   _buildPlateLayer() {
@@ -1837,10 +1820,9 @@ export class SeismicMap {
     this._updateCamera(m);
 
     // Sun reticle on lowest ocean plane
-    this._updateSunReticleTexture(sunLat);
     morphPointCPU(sunLon, sunLat, R_OCEAN + 0.008, m, 0, this.rotLon, this.rotLat, pan2DX, pan2DY, this._sunSprite.position);
-    const spriteScale = m < 0.5 ? 0.36 / Math.sqrt(this.zoom) : 0.28 / Math.sqrt(this.zoom);
-    this._sunSprite.scale.set(spriteScale, spriteScale * 0.25, 1);
+    const spriteSize = ((m < 0.5 ? 0.36 : 0.28) / Math.sqrt(this.zoom)) * 0.25;
+    this._sunSprite.scale.set(spriteSize, spriteSize, 1);
 
     this._updateQuakeDiscs(m);
     this._updateWaves(now, m);

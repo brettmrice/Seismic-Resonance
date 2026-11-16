@@ -122,6 +122,11 @@ body.top-bar-hidden .top-bar * {
   box-shadow: 0 0 12px var(--accent-live);
 }
 
+.brand-pulse.paused {
+  animation-play-state: paused;
+  opacity: 0.35;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.45; transform: scale(0.82); }
@@ -134,11 +139,13 @@ body.top-bar-hidden .top-bar * {
   color: #f8fafc;
 }
 
+.brand-stream-btn,
+.brand-rec-btn,
 .brand-help-btn {
-  margin-left: 4px;
   height: auto;
   aspect-ratio: 1;
   border-radius: 50%;
+  padding: 0;
   border: 1px solid rgba(148, 163, 184, 0.28);
   background: rgba(255, 255, 255, 0.05);
   color: var(--text-primary);
@@ -154,6 +161,43 @@ body.top-bar-hidden .top-bar * {
   transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }
 
+.brand-stream-btn {
+  margin-left: 4px;
+}
+
+.brand-rec-btn {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.brand-stream-btn .btn-stream-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.brand-stream-btn .btn-stream-icon-play {
+  display: none;
+  margin-left: 1px;
+}
+
+.brand-stream-btn.paused .btn-stream-icon-pause {
+  display: none;
+}
+
+.brand-stream-btn.paused .btn-stream-icon-play {
+  display: block;
+}
+
+.brand-stream-btn.paused {
+  border-color: var(--accent-magma);
+  background: rgba(255, 107, 53, 0.16);
+  color: #ffffff;
+}
+
+.brand-stream-btn:hover,
+.brand-stream-btn:focus-visible,
+.brand-rec-btn:hover,
+.brand-rec-btn:focus-visible,
 .brand-help-btn:hover,
 .brand-help-btn:focus-visible {
   outline: none;
@@ -170,6 +214,7 @@ body.top-bar-hidden .top-bar * {
 }
 
 body.asides-hidden .brand .subtitle,
+body.asides-hidden .brand .brand-stream-btn,
 body.asides-hidden .brand .brand-help-btn,
 body.asides-hidden .brand .brand-rec-btn,
 body.asides-hidden .map-mode-bar {
@@ -1286,34 +1331,7 @@ body:not(.asides-hidden) .bottom-zoom-btn.visible {
   line-height: 1.5;
 }
 
-/* Stream Recorder Button & Modal */
-.brand-rec-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.28);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
-}
-
-.brand-rec-btn:hover,
-.brand-rec-btn:focus-visible {
-  outline: none;
-  border-color: var(--accent-magma);
-  background: rgba(255, 107, 53, 0.18);
-  color: #ffffff;
-  box-shadow: 0 0 12px rgba(255, 107, 53, 0.35);
-}
-
+/* Stream Recorder Modal */
 .recorder-modal {
   width: min(760px, 100%);
 }
