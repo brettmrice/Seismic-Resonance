@@ -269,6 +269,7 @@ class App {
         if (this.mode === 'stream') {
           this._resetStreamCursor();
         } else {
+          this.map.stopAutoFollow();
           this.eventListEl.scrollTop = 0;
         }
       });
@@ -544,6 +545,19 @@ class App {
 
       this.allQuakes = events;
       this._applyFilters(isInitial);
+      if (isInitial && this.filteredQuakes.length > 0 && this.map.canAutoTransition()) {
+        const currentQuake =
+          this.mode === 'stream'
+            ? this.filteredQuakes[0]
+            : this.filteredQuakes[this.filteredQuakes.length - 1];
+        if (currentQuake) {
+          this.map.centerOn(currentQuake.lon, currentQuake.lat);
+          if (this.mode === 'stream') {
+            this.map.setSolarTime(this.streamCursorTime);
+            this._setDatetimeDisplay(this.streamCursorTime);
+          }
+        }
+      }
       this.statFeedStatus.textContent = this.localGeoJsonUrl
         ? 'Offline GeoJSON'
         : this.dateRange?.startDate
@@ -580,6 +594,7 @@ class App {
   }
 
   _resetStreamCursor() {
+    this._preCenteredId = null;
     if (!this.filteredQuakes.length) {
       this.streamCursorTime = Date.now();
       this.streamIdx = 0;
@@ -687,6 +702,12 @@ class App {
     });
   }
 
+  _quakePullWeight(quake) {
+    // Earthquake magnitude is logarithmic (base 10): +1.0 mag = ~3.16x pull (+2.0 mag = 10x)
+    const mag = Math.max(0, quake?.mag ?? 2.5);
+    return Math.pow(10, 0.5 * (mag - 2.5));
+  }
+
   _updateAutoCenterForQuake(quake, durationMs = 300) {
     if (!quake) return;
     const list = this.filteredQuakes;
@@ -702,16 +723,80 @@ class App {
     let sy = 0;
     let sz = 0;
     for (const q of windowQuakes) {
+      const w = this._quakePullWeight(q);
       const lonRad = (q.lon || 0) * DEG2RAD;
       const latRad = (q.lat || 0) * DEG2RAD;
       const cosLat = Math.cos(latRad);
-      sx += cosLat * Math.cos(lonRad);
-      sy += cosLat * Math.sin(lonRad);
-      sz += Math.sin(latRad);
+      sx += w * cosLat * Math.cos(lonRad);
+      sy += w * cosLat * Math.sin(lonRad);
+      sz += w * Math.sin(latRad);
     }
     const avgLon = Math.atan2(sy, sx) / DEG2RAD;
     const avgLat = Math.atan2(sz, Math.hypot(sx, sy)) / DEG2RAD;
     this.map.setAutoCenterLon(avgLon, durationMs, avgLat);
+  }
+
+  _updateStreamAutoCenter() {
+    const list = this.filteredQuakes;
+    if (!list.length) return;
+
+    const idx = Math.max(0, Math.min(list.length, this.streamIdx));
+    const prevQuake = idx > 0 ? list[idx - 1] : null;
+    const nextQuake = idx < list.length ? list[idx] : null;
+
+    let gapProgress = 1;
+    if (prevQuake && nextQuake) {
+      const span = Math.max(1, nextQuake.time - prevQuake.time);
+      gapProgress = Math.max(0, Math.min(1, (this.streamCursorTime - prevQuake.time) / span));
+    }
+
+    const start = Math.max(0, idx - 3);
+    const end = Math.min(list.length, idx + 4);
+    const sigmaSec = 1.8;
+    const DEG2RAD = Math.PI / 180;
+
+    let sx = 0;
+    let sy = 0;
+    let sz = 0;
+    let magNum = 0;
+    let magDen = 0;
+
+    for (let i = start; i < end; i++) {
+      const q = list[i];
+      const dtSec = (q.time - this.streamCursorTime) / (1000 * this.speedMultiplier);
+      let wTime = Math.exp(-0.5 * (dtSec / sigmaSec) * (dtSec / sigmaSec));
+
+      // Smoothly bridge wide time gaps between prevQuake and nextQuake
+      if (q === prevQuake) wTime = Math.max(wTime, 0.08 * (1 - gapProgress));
+      if (q === nextQuake) wTime = Math.max(wTime, 0.08 * (prevQuake ? gapProgress : 1));
+
+      if (wTime < 1e-4) continue;
+
+      const mag = Math.max(0, q.mag ?? 2.5);
+      const w = wTime * this._quakePullWeight(q);
+      const lonRad = (q.lon || 0) * DEG2RAD;
+      const latRad = (q.lat || 0) * DEG2RAD;
+      const cosLat = Math.cos(latRad);
+      sx += w * cosLat * Math.cos(lonRad);
+      sy += w * cosLat * Math.sin(lonRad);
+      sz += w * Math.sin(latRad);
+      magNum += w * mag;
+      magDen += w;
+    }
+
+    const effectiveMag = magDen > 0 ? magNum / magDen : 2.5;
+    const pullBoost = Math.max(0, Math.min(1, (effectiveMag - 3.5) / 4.5));
+    const smoothTimeSec = 1.45 - 0.55 * pullBoost;
+
+    if (Math.hypot(sx, sy, sz) > 1e-4) {
+      const avgLon = Math.atan2(sy, sx) / DEG2RAD;
+      const avgLat = Math.atan2(sz, Math.hypot(sx, sy)) / DEG2RAD;
+      this.map.setAutoCenterTarget(avgLon, avgLat, smoothTimeSec);
+    } else if (nextQuake) {
+      this.map.setAutoCenterTarget(nextQuake.lon, nextQuake.lat, smoothTimeSec);
+    } else if (prevQuake) {
+      this.map.setAutoCenterTarget(prevQuake.lon, prevQuake.lat, smoothTimeSec);
+    }
   }
 
   triggerEvent(quake, { syncStream = true } = {}) {
@@ -801,14 +886,9 @@ class App {
       this.streamIdx++;
     }
 
-    // Glide continuously between events toward the next event over the exact inter-event delay
-    if (this.streamIdx < this.filteredQuakes.length) {
-      const nextQuake = this.filteredQuakes[this.streamIdx];
-      if (this._preCenteredId !== nextQuake.id && this.map.canAutoTransition()) {
-        this._preCenteredId = nextQuake.id;
-        const delayMs = Math.max(80, (nextQuake.time - this.streamCursorTime) / this.speedMultiplier);
-        this._updateAutoCenterForQuake(nextQuake, delayMs);
-      }
+    // Continuously update the time-weighted target for the critically damped auto-camera
+    if (this.map.canAutoTransition()) {
+      this._updateStreamAutoCenter();
     }
 
     if (this.streamCursorTime > lastTime + 60000) {
