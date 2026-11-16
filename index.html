@@ -19,12 +19,25 @@
 
     <!-- Top Header Bar -->
     <header class="top-bar">
-      <div class="brand glass">
-        <div>
-          <h1>SEISMIC RESONANCE</h1>
-          <p class="subtitle">Real-Time USGS Earthquake Sonification · Sub-Bass Engine</p>
+      <div class="top-bar-left">
+        <div class="brand glass">
+          <div>
+            <h1>SEISMIC RESONANCE</h1>
+            <p class="subtitle">Real-Time USGS Earthquake Sonification · Sub-Bass Engine</p>
+          </div>
+          <button id="btn-recorder-open" class="brand-rec-btn" type="button" title="Offline Stream Recorder" aria-label="Open Stream Recorder" aria-controls="recorder-modal-backdrop">
+            <span>REC</span>
+          </button>
+          <button id="btn-readme" class="brand-help-btn" type="button" title="About &amp; README" aria-label="Open README and project info" aria-expanded="false" aria-controls="readme-modal-backdrop">?</button>
         </div>
-        <button id="btn-readme" class="brand-help-btn" type="button" title="About &amp; README" aria-label="Open README and project info" aria-expanded="false" aria-controls="readme-modal-backdrop">?</button>
+
+        <div class="map-mode-bar glass" id="map-mode-bar">
+          <span class="stat-label">MAP</span>
+          <div class="segmented map-mode-toggle" id="map-mode-toggle" role="group" aria-label="Map projection mode">
+            <button type="button" data-map-mode="2d">2D</button>
+            <button type="button" data-map-mode="3d" class="active">3D</button>
+          </div>
+        </div>
       </div>
 
       <div class="header-stats glass">
@@ -46,9 +59,6 @@
           </span>
         </div>
         <div class="stat-pill stat-pill-summary">
-          <span class="stat-label">DT</span>
-          <span class="stat-value stat-count mono" id="stat-datetime">-- --- --:-- ---</span>
-          <span class="stat-sep" aria-hidden="true">|</span>
           <span class="stat-label" id="stat-dataset-label">PAST</span>
           <span class="stat-value stat-count mono" id="stat-dataset-value">24H (All)</span>
           <span class="stat-sep" aria-hidden="true">|</span>
@@ -88,11 +98,12 @@
             <label for="range-speed">Stream Speed</label>
             <span class="mono val-badge" id="val-speed">360× | 1 min = 6h</span>
           </div>
-          <input type="range" id="range-speed" min="1" max="4" step="1" value="3" />
+          <input type="range" id="range-speed" min="1" max="5" step="1" value="3" />
           <div class="range-labels">
             <span>60×</span>
             <span>180×</span>
             <span>360×</span>
+            <span>480×</span>
             <span>900×</span>
           </div>
         </div>
@@ -128,6 +139,18 @@
             <option value="pentatonic">Minor Pentatonic</option>
             <option value="just">Just Intonation Drone</option>
           </select>
+        </label>
+
+        <label class="field">
+          <span>Speaker Layout</span>
+          <select id="select-channels">
+            <option value="1">1.0 (Mono)</option>
+            <option value="2" selected>2.0 (Stereo)</option>
+            <option value="4">4.0 (Quad)</option>
+            <option value="6">5.1 (Surround + LFE)</option>
+            <option value="8">7.1 (Surround + LFE)</option>
+          </select>
+          <span class="hint channel-note" id="channel-layout-note">Start audio to detect device channel limit</span>
         </label>
 
         <div class="field">
@@ -178,6 +201,7 @@
         <div class="panel-legend" aria-label="Earthquake Depth Scale (km)">
           <canvas id="depth-legend-canvas"></canvas>
         </div>
+        <span class="stat-value stat-count mono" id="stat-datetime">-- --- --:-- ---</span>
       </div>
       <div id="event-list" class="event-list">
         <div class="empty-state">Loading USGS seismic feed…</div>
@@ -191,15 +215,9 @@
       <div id="solar-dial-readout" class="solar-dial-readout mono hidden"></div>
     </section>
 
-    <!-- Local Time Zone Map Overlay Pill -->
-    <div id="map-tz-pill" class="stat-pill map-tz-pill glass" aria-live="polite">
-      <span class="stat-label">DT</span>
-      <span class="stat-value stat-count mono" id="map-local-datetime">-- --- --:-- ---</span>
-    </div>
-
     <!-- Bottom Bar: Sub-Bass Stereo Spectrum & Audio Control -->
     <footer class="bottom-bar">
-      <button id="btn-reset-zoom" class="btn-ghost bottom-zoom-btn" title="Reset map pan and zoom" aria-label="Reset map pan and zoom">
+      <button id="btn-reset-zoom" class="btn-ghost bottom-zoom-btn" title="Reset globe rotation and zoom" aria-label="Reset globe rotation and zoom">
         <svg class="btn-zoom-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
           <path d="M3 3v5h5"></path>
@@ -270,10 +288,10 @@
             <h3>Key Features &amp; Sonification Mapping</h3>
             <ul class="readme-list">
               <li><strong>Live USGS Seismic Feeds:</strong> Switch between <em>Past Hour (All)</em>, <em>Past 24 Hours (All)</em>, <em>Past 24 Hours (M2.5+)</em>, and <em>Past 7 Days (M4.5+)</em>, with automatic polling every 30 seconds.</li>
-              <li><strong>Time-Lapse Stream &amp; Live Mode:</strong> Replay recent global activity at <code>60×</code>, <code>180×</code>, <code>360×</code>, or <code>900×</code> speed, or switch to <em>Live Only</em> to listen strictly for newly arriving earthquakes.</li>
+              <li><strong>Time-Lapse Stream &amp; Live Mode:</strong> Replay recent global activity at <code>60×</code>, <code>180×</code>, <code>360×</code>, <code>480×</code>, or <code>900×</code> speed, or switch to <em>Live Only</em> to listen strictly for newly arriving earthquakes.</li>
               <li><strong>Low-Frequency Sub-Bass Synth:</strong> Choose between <em>Tectonic Rumble</em>, <em>Sub-Bass Pulse</em>, and <em>Abyssal Pad</em> timbres across four harmonic scales (<em>Deep Dorian</em>, <em>Phrygian Dominant</em>, <em>Minor Pentatonic</em>, <em>Just Intonation Drone</em>), with adjustable root frequency (<code>27.5–65.4 Hz</code>) and an optional continuous <strong>41 Hz Earth Drone</strong>.</li>
               <li><strong>Spatial &amp; Depth Mapping:</strong> Depth is color-coded—Shallow (<code>&lt; 70 km</code>, Magma Coral), Mid (<code>70–300 km</code>, Amber Gold), and Deep (<code>≥ 300 km</code>, Abyssal Cyan)—and mapped to pitch/envelope, while longitude pans across the stereo field into dual L/R spectrum analyzers.</li>
-              <li><strong>Interactive Map:</strong> Pan and zoom across the globe, toggle tectonic plate boundaries, click any quake to audition its sound, or <code>Shift + Click</code> anywhere on the map to trigger a synthetic tremor.</li>
+              <li><strong>Interactive 3D Globe:</strong> Drag to rotate and scroll to zoom across the globe, toggle tectonic plate boundaries, click any quake to audition its sound, or <code>Shift + Click</code> anywhere on the globe to trigger a synthetic tremor.</li>
             </ul>
           </section>
 
@@ -286,6 +304,224 @@ python local.py --test</code></pre>
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- Recorder Modal -->
+  <div id="recorder-modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="recorder-modal-title">
+    <div class="readme-modal recorder-modal glass" role="document">
+      <div class="readme-modal-header">
+        <div>
+          <h2 id="recorder-modal-title">STREAM RECORDER</h2>
+          <p class="readme-modal-subtitle">Record a 1-Cycle Time-Lapse Stream with Stereo Sub-Bass Audio</p>
+        </div>
+        <button id="btn-recorder-close" class="readme-close-btn" type="button" title="Close (Esc)" aria-label="Close Recorder modal">&times;</button>
+      </div>
+      <div class="readme-modal-body">
+        <div class="recorder-grid">
+          <label class="field">
+            <span>Data Source</span>
+            <select id="rec-source">
+              <option value="current">Current Loaded Feed</option>
+              <option value="day" selected>Single Local Day (24H All Quakes)</option>
+              <option value="range">Custom Date Range (Local)</option>
+              <option value="geojson">Local .geojson File (Offline)</option>
+            </select>
+          </label>
+
+          <label class="field" id="rec-date-row">
+            <span>Local Date (24H)</span>
+            <input type="date" id="rec-date" />
+          </label>
+
+          <div class="field recorder-span-2 hidden" id="rec-range-row">
+            <span>Local Date Range</span>
+            <div class="recorder-inline">
+              <input type="date" id="rec-start-date" aria-label="Start date" />
+              <span>to</span>
+              <input type="date" id="rec-end-date" aria-label="End date" />
+            </div>
+          </div>
+
+          <label class="field recorder-span-2 hidden" id="rec-geojson-row">
+            <span>Local GeoJSON File</span>
+            <input type="file" id="rec-geojson-file" accept=".json,.geojson" />
+          </label>
+
+          <label class="field">
+            <span>Min Magnitude</span>
+            <input type="number" id="rec-min-mag" min="0" max="9" step="0.1" value="0" />
+          </label>
+
+          <label class="field">
+            <span>Max Magnitude</span>
+            <input type="number" id="rec-max-mag" min="0" max="10" step="0.1" value="10" />
+          </label>
+
+          <label class="field">
+            <span>Stream Speed</span>
+            <select id="rec-speed">
+              <option value="60">60× (24m / day)</option>
+              <option value="180">180× (8m / day)</option>
+              <option value="360">360× (4m / day)</option>
+              <option value="480" selected>480× (3m / day)</option>
+              <option value="900">900× (1.6m / day)</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Voice Timbre</span>
+            <select id="rec-timbre">
+              <option value="tectonic" selected>Tectonic Rumble</option>
+              <option value="subpulse">Sub-Bass Pulse</option>
+              <option value="abyssal">Abyssal Pad</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Harmonic Scale</span>
+            <select id="rec-scale">
+              <option value="dorian" selected>Deep Dorian</option>
+              <option value="phrygian">Phrygian Dominant</option>
+              <option value="pentatonic">Minor Pentatonic</option>
+              <option value="just">Just Intonation Drone</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Root Frequency (Hz)</span>
+            <input type="number" id="rec-root-freq" min="27.5" max="65.4" step="0.1" value="36.7" />
+          </label>
+
+          <label class="field">
+            <span>Audio Channels</span>
+            <select id="rec-channels">
+              <option value="1">1.0 (Mono)</option>
+              <option value="2" selected>2.0 (Stereo)</option>
+              <option value="4">4.0 (Quad)</option>
+              <option value="6">5.1 (Surround + LFE)</option>
+              <option value="8">7.1 (Surround + LFE)</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Resolution</span>
+            <select id="rec-resolution">
+              <option value="720p">720p (1280×720)</option>
+              <option value="1080p" selected>1080p (1920×1080)</option>
+              <option value="4k">4K UHD (3840×2160)</option>
+              <option value="8k">8K UHD (7680×4320)</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+
+          <div class="field recorder-span-2 hidden" id="rec-custom-res-row">
+            <span>Custom Resolution (W × H, browser max 1920×1080)</span>
+            <div class="recorder-inline">
+              <input type="number" id="rec-width" min="320" max="7680" step="2" value="1920" />
+              <span>×</span>
+              <input type="number" id="rec-height" min="240" max="4320" step="2" value="1080" />
+            </div>
+          </div>
+
+          <label class="field">
+            <span>Frame Rate (FPS)</span>
+            <select id="rec-fps">
+              <option value="30" selected>30 FPS</option>
+              <option value="60">60 FPS</option>
+              <option value="120">120 FPS</option>
+              <option value="240">240 FPS</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Video Quality</span>
+            <select id="rec-quality">
+              <option value="low">Low (4 Mbps)</option>
+              <option value="medium" selected>Medium (10 Mbps)</option>
+              <option value="high">High (22 Mbps)</option>
+              <option value="lossless">Ultra (45 Mbps)</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Dynamic Range (HDR)</span>
+            <select id="rec-hdr">
+              <option value="off" selected>SDR (8-bit Rec. 709)</option>
+              <option value="pq">HDR10 (10-bit Rec. 2020 PQ)</option>
+              <option value="hlg">HLG (10-bit Rec. 2020 HLG)</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Audio Output Quality</span>
+            <select id="rec-audio-quality">
+              <option value="standard" selected>Standard (192 kbps / 16-bit)</option>
+              <option value="high">High (320 kbps / 24-bit)</option>
+              <option value="ultra">Ultra Hi-Fi (510+ kbps / 32-bit Float · 96kHz)</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Capture Mode</span>
+            <select id="rec-capture-mode">
+              <option value="canvas" selected>Clean Cinema Canvas (Auto)</option>
+              <option value="tab">Full Tab DOM (Screen Share)</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Output Filename</span>
+            <input type="text" id="rec-filename" placeholder="seismic_2026-11-14_480x.webm" />
+          </label>
+        </div>
+
+        <div class="recorder-toggles">
+          <label class="recorder-check">
+            <input type="checkbox" id="rec-clean-ui" checked />
+            <span>Clean Cinema Mode (Hide Side Panels)</span>
+          </label>
+          <label class="recorder-check">
+            <input type="checkbox" id="rec-plates" checked />
+            <span>Show Tectonic Plates</span>
+          </label>
+          <label class="recorder-check">
+            <input type="checkbox" id="rec-drone" />
+            <span>41 Hz Earth Drone</span>
+          </label>
+        </div>
+
+        <div class="recorder-status-box">
+          <div id="rec-offline-notice" class="rec-offline-notice hidden">
+            <p class="rec-offline-notice-text">
+              Browser output is limited to <strong>1080p / 60 FPS / 8-bit SDR</strong>. If you start recording here, max browser settings will be used.
+              For true deterministic capture at your selected settings (including 4K/8K, high FPS, and 10-bit HDR), copy and run the offline Python command (<code>recorder/record.py</code>):
+            </p>
+            <div class="rec-offline-bridge">
+              <button id="btn-rec-copy-cmd" class="btn-secondary btn-compact" type="button">Copy Python Cmd</button>
+              <button id="btn-rec-export-cfg" class="btn-secondary btn-compact" type="button">Export Config JSON</button>
+            </div>
+          </div>
+          <p id="rec-multichannel-note" class="rec-multichannel-note hidden">
+            Browser video capture only encodes 2.0 (Stereo) Opus. A separate discrete multichannel <strong>.wav</strong> audio file will also be downloaded.
+          </p>
+          <div class="rec-progress-track">
+            <div id="rec-progress-bar" class="rec-progress-bar"></div>
+          </div>
+          <p id="rec-status-text" class="rec-status-text">Ready to record a 1-cycle stream pass.</p>
+        </div>
+
+        <div class="recorder-actions">
+          <button id="btn-rec-download" class="btn-secondary hidden" type="button">Download Recording</button>
+          <button id="btn-rec-start" class="btn-primary" type="button">Start 1-Cycle Recording</button>
+          <button id="btn-rec-stop" class="btn-secondary hidden" type="button">Stop &amp; Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="rec-toast" class="rec-toast glass hidden" role="status" aria-live="polite">
+    <span id="rec-toast-text"></span>
+    <button id="rec-toast-close" class="rec-toast-close" type="button" aria-label="Dismiss notification">&times;</button>
   </div>
 
   <script type="module" src="src/main.js"></script>

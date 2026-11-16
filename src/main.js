@@ -1,8 +1,14 @@
 import { SeismicAudioEngine } from './audio.js';
-import { fetchEarthquakes } from './usgs.js';
+import {
+  fetchEarthquakes,
+  fetchEarthquakesByRange,
+  fetchEarthquakesFromUrl,
+  parseGeoJsonPayload,
+} from './usgs.js';
 import { SeismicMap } from './map.js';
+import { SeismicRecorder, RESOLUTION_PRESETS, encodeWavBlob } from './recorder.js';
 
-const SPEED_OPTIONS = [60, 180, 360, 900];
+const SPEED_OPTIONS = [60, 180, 360, 480, 900];
 const POLL_INTERVAL_MS = 30000;
 const ASIDE_IDLE_MS = 5000;
 const HUD_CARD_LINGER_MS = 1500;
@@ -38,6 +44,14 @@ function formatLocalTime(ts) {
   const mm = String(d.getMinutes()).padStart(2, '0');
   const tz = getShortTimeZone(d);
   return tz ? `${day} ${mth} ${hh}:${mm} ${tz}` : `${day} ${mth} ${hh}:${mm}`;
+}
+
+function formatLocalDateInput(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function formatUtcDayMonth(ms) {
@@ -76,6 +90,11 @@ class App {
     this.mode = 'stream'; // 'stream' | 'live'
     this.speedMultiplier = 360;
     this.minMag = 0;
+    this.maxMag = 10;
+    this.dateRange = null;
+    this.localGeoJsonUrl = null;
+    this.cleanUI = false;
+    this.recorder = new SeismicRecorder(this);
 
     // Stream replay state
     this.streamCursorTime = 0;
@@ -99,7 +118,10 @@ class App {
     this._initElements();
     this._initMap();
     this._bindControls();
+    this._bindRecorderModal();
     this._initIdleAsides();
+    this._applyUrlOverrides();
+    this._exposeRecorderAPI();
     this._start();
   }
 
@@ -122,12 +144,6 @@ class App {
 
     this.statFeedStatus = document.getElementById('stat-feed-status');
     this.statDatetimeEl = document.getElementById('stat-datetime');
-    this.mapTzPill = document.getElementById('map-tz-pill');
-    this.mapLocalDatetimeEl = document.getElementById('map-local-datetime');
-    this.bottomBarEl = document.querySelector('.bottom-bar');
-    this.bottomBarLeftEl = document.querySelector('.bottom-bar-left');
-    this.bottomBarRightEl = document.querySelector('.bottom-bar-right');
-    this._lastMapTzX = null;
     this.statDatasetValue = document.getElementById('stat-dataset-value');
     this.statEventCount = document.getElementById('stat-event-count');
     this.eventListEl = document.getElementById('event-list');
@@ -152,9 +168,12 @@ class App {
     this.rangeVolume = document.getElementById('range-volume');
     this.valVolume = document.getElementById('val-volume');
     this.toggleDrone = document.getElementById('toggle-drone');
+    this.selectChannels = document.getElementById('select-channels');
+    this.channelLayoutNote = document.getElementById('channel-layout-note');
     this.togglePlates = document.getElementById('toggle-plates');
     this.btnTriggerLatest = document.getElementById('btn-trigger-latest');
     this.btnResetZoom = document.getElementById('btn-reset-zoom');
+    this.mapModeToggle = document.getElementById('map-mode-toggle');
 
     this.btnReadme = document.getElementById('btn-readme');
     this.readmeBackdrop = document.getElementById('readme-modal-backdrop');
@@ -187,6 +206,23 @@ class App {
         }
       }
     );
+
+    let savedMapMode = '3d';
+    try {
+      const stored = localStorage.getItem('seismic_map_mode');
+      if (stored === '2d' || stored === '3d') savedMapMode = stored;
+    } catch {
+      // Ignore storage errors
+    }
+    this.map.setMapMode(savedMapMode, { animate: false });
+    this._syncMapModeUI(savedMapMode);
+  }
+
+  _syncMapModeUI(mode) {
+    if (!this.mapModeToggle) return;
+    this.mapModeToggle.querySelectorAll('button[data-map-mode]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.mapMode === mode);
+    });
   }
 
   _bindControls() {
@@ -194,6 +230,7 @@ class App {
       if (!this.audio.ctx || !this.audio.enabled) {
         await this.audio.init();
         this.audio.setEnabled(true);
+        this._syncChannelLayoutUI();
         document.body.classList.add('audio-active');
         this.btnAudio.classList.add('active');
         this.btnAudio.title = 'Mute Audio';
@@ -262,6 +299,13 @@ class App {
       this.audio.setScale(e.target.value);
     });
 
+    this.selectChannels?.addEventListener('change', (e) => {
+      this.audio.setChannelCount(Number(e.target.value));
+      if (this.audio.ctx) {
+        this._syncChannelLayoutUI();
+      }
+    });
+
     const onRootFreqChange = (e) => {
       const hz = Number(e.target.value);
       this.audio.setRootFreq(hz);
@@ -280,6 +324,19 @@ class App {
 
     this.btnResetZoom?.addEventListener('click', () => {
       this.map.resetView();
+    });
+
+    this.mapModeToggle?.querySelectorAll('button[data-map-mode]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.mapMode === '2d' ? '2d' : '3d';
+        this._syncMapModeUI(mode);
+        this.map.setMapMode(mode, { animate: true });
+        try {
+          localStorage.setItem('seismic_map_mode', mode);
+        } catch {
+          // Ignore storage errors
+        }
+      });
     });
 
     this.solarDialCanvas.addEventListener('mousemove', (e) => {
@@ -308,6 +365,7 @@ class App {
       if (!this.audio.ctx || !this.audio.enabled) {
         await this.audio.init();
         this.audio.setEnabled(true);
+        this._syncChannelLayoutUI();
         document.body.classList.add('audio-active');
         this.btnAudio.classList.add('active');
         this.btnAudio.title = 'Mute Audio';
@@ -338,6 +396,25 @@ class App {
         this.closeReadmeModal();
       }
     });
+  }
+
+  _syncChannelLayoutUI() {
+    if (!this.selectChannels || !this.audio.ctx) return;
+    const maxCh = this.audio.getMaxChannelCount();
+    let hasDisabled = false;
+    for (const opt of this.selectChannels.options) {
+      const ch = Number(opt.value);
+      const unsupported = ch > maxCh;
+      opt.disabled = unsupported;
+      if (unsupported) hasDisabled = true;
+    }
+    this.selectChannels.value = String(this.audio.channelCount);
+    if (this.channelLayoutNote) {
+      const lfeActive = this.audio.channelCount >= 6 ? ' · LFE sub-bass active' : '';
+      this.channelLayoutNote.textContent = hasDisabled
+        ? `Device max: ${maxCh} ch (options above ${maxCh} ch disabled)${lfeActive}`
+        : `Device max: ${maxCh} ch${lfeActive}`;
+    }
   }
 
   /**
@@ -430,7 +507,7 @@ class App {
     await this.map.loadGeoData();
     await this.loadFeed(true);
     setInterval(() => {
-      if (!this.isPaused) {
+      if (!this.isPaused && !this.dateRange && !this.localGeoJsonUrl && !this.recorder.isRecording) {
         this.loadFeed(false);
       }
     }, POLL_INTERVAL_MS);
@@ -440,7 +517,20 @@ class App {
   async loadFeed(isInitial = false) {
     try {
       this.statFeedStatus.textContent = 'Syncing…';
-      const { events } = await fetchEarthquakes(this.feedKey);
+      let result;
+      if (this.localGeoJsonUrl) {
+        result = await fetchEarthquakesFromUrl(this.localGeoJsonUrl);
+      } else if (this.dateRange?.startDate) {
+        result = await fetchEarthquakesByRange({
+          startDate: this.dateRange.startDate,
+          endDate: this.dateRange.endDate,
+          minMag: this.minMag,
+          maxMag: this.maxMag,
+        });
+      } else {
+        result = await fetchEarthquakes(this.feedKey);
+      }
+      const { events } = result;
       const newlyArrived = [];
 
       for (const q of events) {
@@ -454,12 +544,16 @@ class App {
 
       this.allQuakes = events;
       this._applyFilters(isInitial);
-      this.statFeedStatus.textContent = 'USGS Live';
+      this.statFeedStatus.textContent = this.localGeoJsonUrl
+        ? 'Offline GeoJSON'
+        : this.dateRange?.startDate
+          ? 'USGS Archive'
+          : 'USGS Live';
 
       // Trigger real-time incoming earthquakes
       if (!isInitial && newlyArrived.length > 0) {
         newlyArrived
-          .filter((q) => q.mag >= this.minMag)
+          .filter((q) => q.mag >= this.minMag && q.mag <= this.maxMag)
           .slice(-5)
           .forEach((q, i) => {
             setTimeout(() => this.triggerEvent(q), i * 240);
@@ -472,7 +566,9 @@ class App {
   }
 
   _applyFilters(resetStream = false) {
-    this.filteredQuakes = this.allQuakes.filter((q) => q.mag >= this.minMag);
+    this.filteredQuakes = this.allQuakes.filter(
+      (q) => q.mag >= this.minMag && q.mag <= this.maxMag
+    );
     this.map.setQuakes(this.filteredQuakes);
 
     this.statEventCount.textContent = String(this.filteredQuakes.length);
@@ -602,15 +698,20 @@ class App {
 
     if (!windowQuakes.length) return;
     const DEG2RAD = Math.PI / 180;
-    let sinSum = 0;
-    let cosSum = 0;
+    let sx = 0;
+    let sy = 0;
+    let sz = 0;
     for (const q of windowQuakes) {
-      const rad = (q.lon || 0) * DEG2RAD;
-      sinSum += Math.sin(rad);
-      cosSum += Math.cos(rad);
+      const lonRad = (q.lon || 0) * DEG2RAD;
+      const latRad = (q.lat || 0) * DEG2RAD;
+      const cosLat = Math.cos(latRad);
+      sx += cosLat * Math.cos(lonRad);
+      sy += cosLat * Math.sin(lonRad);
+      sz += Math.sin(latRad);
     }
-    const avgLon = Math.atan2(sinSum, cosSum) / DEG2RAD;
-    this.map.setAutoCenterLon(avgLon, durationMs);
+    const avgLon = Math.atan2(sy, sx) / DEG2RAD;
+    const avgLat = Math.atan2(sz, Math.hypot(sx, sy)) / DEG2RAD;
+    this.map.setAutoCenterLon(avgLon, durationMs, avgLat);
   }
 
   triggerEvent(quake, { syncStream = true } = {}) {
@@ -630,11 +731,19 @@ class App {
       this._updateAutoCenterForQuake(quake, 600);
     }
 
-    const pan = this.map.getStereoPan(quake.lon, quake.lat);
-    const voice = this.audio.triggerQuake(quake, pan);
+    const spatial = this.map.getSolarSpatialPan(quake.lon, quake.lat);
+    if (this._offlineRender?.active) {
+      this._offlineRender.audioEvents.push({
+        timeSec: this._offlineRender.clockMs / 1000,
+        quake,
+        spatial,
+      });
+    }
+    const voice = this.audio.triggerQuake(quake, spatial);
     this.map.spawnWave(quake, voice);
     this._pushHudEventCard(quake, voice);
 
+    const pan = spatial.x * 0.85;
     const rgb = depthColorRGB(quake.depth ?? 10);
     const wL = Math.max(0.15, Math.min(1, (1 - pan) * 0.55));
     const wR = Math.max(0.15, Math.min(1, (1 + pan) * 0.55));
@@ -671,47 +780,6 @@ class App {
   _setDatetimeDisplay(ts) {
     const formatted = formatLocalTime(ts);
     if (this.statDatetimeEl) this.statDatetimeEl.textContent = formatted;
-    if (this.mapLocalDatetimeEl) this.mapLocalDatetimeEl.textContent = formatted;
-  }
-
-  _updateMapTzPill() {
-    if (!this.mapTzPill || !this.map || this.map.width <= 0) return;
-
-    const ts = Number.isFinite(this.map.solarTimeMs) ? this.map.solarTimeMs : Date.now();
-    const tzLon = (-new Date(ts).getTimezoneOffset() / 60) * 15;
-    const [baseX] = this.map.project(tzLon, 0);
-    const worldW = this.map.bounds.w * this.map.zoom;
-
-    let targetX = baseX;
-    if (worldW > 0) {
-      const halfW = this.map.width / 2;
-      const k = Math.round((halfW - baseX) / worldW);
-      targetX = baseX + k * worldW;
-    }
-
-    const leftRect = this.bottomBarLeftEl?.getBoundingClientRect();
-    const rightRect = this.bottomBarRightEl?.getBoundingClientRect();
-    const barRect = this.bottomBarEl?.getBoundingClientRect();
-
-    let minBound = 14;
-    let maxBound = window.innerWidth - 14;
-    if (leftRect && rightRect && leftRect.width > 0 && rightRect.width > 0) {
-      minBound = leftRect.left;
-      maxBound = rightRect.right;
-    } else if (barRect && barRect.width > 0) {
-      minBound = barRect.left;
-      maxBound = barRect.right;
-    }
-
-    const halfPill = (this.mapTzPill.offsetWidth || 0) / 2;
-    const minX = minBound + halfPill;
-    const maxX = Math.max(minX, maxBound - halfPill);
-    const clampedX = Math.max(minX, Math.min(maxX, targetX));
-
-    if (this._lastMapTzX === null || Math.abs(clampedX - this._lastMapTzX) > 0.25) {
-      this._lastMapTzX = clampedX;
-      this.mapTzPill.style.left = `${clampedX.toFixed(1)}px`;
-    }
   }
 
   _stepStream(dtMs) {
@@ -744,12 +812,173 @@ class App {
     }
 
     if (this.streamCursorTime > lastTime + 60000) {
-      this._preCenteredId = null;
-      this._resetStreamCursor();
+      if (this._offlineRender?.active) {
+        this._offlineRender.cycleComplete = true;
+      } else {
+        this._preCenteredId = null;
+        this.recorder.handleStreamCycleComplete();
+        window.dispatchEvent(new CustomEvent('seismic-cycle-complete'));
+        this._resetStreamCursor();
+      }
     }
 
     this.map.setSolarTime(this.streamCursorTime);
     this._setDatetimeDisplay(this.streamCursorTime);
+  }
+
+  _computeOfflineSpectrum(dtMs = 16) {
+    const st = this._offlineRender;
+    const tSec = st.clockMs / 1000;
+    const numBins = st.specBinsL.length;
+    const minFreq = 20;
+    const maxFreq = 450;
+    const logMin = Math.log(minFreq);
+    const logMax = Math.log(maxFreq);
+    const logSpan = logMax - logMin;
+
+    const instL = new Float32Array(numBins);
+    const instR = new Float32Array(numBins);
+    const instDrone = new Float32Array(numBins);
+
+    const waveLen = 256;
+    const waveL = new Float32Array(waveLen);
+    const waveR = new Float32Array(waveLen);
+    const droneWave = st.droneEnabled ? new Float32Array(waveLen) : null;
+
+    const addPeak = (arr, freq, amp, sigma = 0.045) => {
+      if (freq < minFreq * 0.8 || freq > maxFreq * 1.2 || amp <= 0.001) return;
+      const center = (Math.log(Math.max(minFreq, Math.min(maxFreq, freq))) - logMin) / logSpan;
+      const halfSpan = Math.ceil(sigma * 3.2 * numBins);
+      const cIdx = Math.round(center * (numBins - 1));
+      const i0 = Math.max(0, cIdx - halfSpan);
+      const i1 = Math.min(numBins - 1, cIdx + halfSpan);
+      for (let i = i0; i <= i1; i++) {
+        const d = (i / (numBins - 1) - center) / sigma;
+        arr[i] += amp * Math.exp(-d * d);
+      }
+    };
+
+    const timbre = this.audio.timbre || 'tectonic';
+    const vol = this.audio.volume ?? 0.8;
+    const events = st.audioEvents;
+    const windowSec = 0.08;
+
+    // Advance cursor past events whose envelope + tail have fully decayed
+    while (st.specEventStartIdx < events.length) {
+      const ev = events[st.specEventStartIdx];
+      const mag = Math.max(0.2, ev.quake.mag ?? 1.5);
+      const magNorm = Math.min(1, Math.max(0, (mag - 0.5) / 6.0));
+      const dur = 1.1 + magNorm * 5.1;
+      const maxEnd = ev.timeSec + dur + 1.6;
+      if (maxEnd < tSec) {
+        st.specEventStartIdx += 1;
+      } else {
+        break;
+      }
+    }
+
+    let activeCount = 0;
+    for (let idx = st.specEventStartIdx; idx < events.length; idx++) {
+      const ev = events[idx];
+      if (ev.timeSec > tSec) break;
+      const dt = tSec - ev.timeSec;
+      const mag = Math.max(0.2, ev.quake.mag ?? 1.5);
+      const magNorm = Math.min(1, Math.max(0, (mag - 0.5) / 6.0));
+      const depth = Math.max(0, Math.min(650, ev.quake.depth ?? 10));
+      const depthNorm = 1 - depth / 650;
+      const duration = 1.1 + magNorm * 5.1;
+      const isAbyssal = timbre === 'abyssal';
+      const isSubpulse = timbre === 'subpulse';
+      const sDelay = !isAbyssal && !isSubpulse ? 0.06 + (1 - depthNorm) * 0.07 : 0;
+      const attack = isAbyssal ? 0.38 + magNorm * 0.55 : isSubpulse ? 0.025 : sDelay + 0.055;
+      const totalDuration = isAbyssal ? duration + 1.4 : sDelay + duration;
+      if (dt > totalDuration) continue;
+
+      activeCount += 1;
+      const polyScale = Math.max(0.32, 1 / Math.sqrt(activeCount));
+      const gainLevel = (0.14 + magNorm * 0.46) * polyScale * vol;
+
+      let env = 0;
+      if (dt < attack) {
+        env = dt / Math.max(0.005, attack);
+      } else {
+        const rel = (dt - attack) / Math.max(0.1, totalDuration - attack);
+        env = Math.pow(0.008, rel);
+      }
+      if (env <= 0.002) continue;
+
+      const freq = this.audio.computeFrequency(ev.quake);
+      const pan = Math.max(-0.85, Math.min(0.85, ev.spatial?.x || 0));
+      const theta = (pan + 1) * Math.PI * 0.25;
+      const gL = Math.cos(theta);
+      const gR = Math.sin(theta);
+      const subTheta = (pan * 0.45 + 1) * Math.PI * 0.25;
+      const subGL = Math.cos(subTheta);
+      const subGR = Math.sin(subTheta);
+
+      const amp = Math.min(1.0, gainLevel * env * 2.1);
+      addPeak(instL, freq, amp * subGL, 0.042);
+      addPeak(instR, freq, amp * subGR, 0.042);
+
+      if (isSubpulse) {
+        const subF = Math.max(24, freq * 0.5);
+        addPeak(instL, subF, amp * 0.7 * subGL, 0.045);
+        addPeak(instR, subF, amp * 0.7 * subGR, 0.045);
+      } else if (isAbyssal) {
+        const subF = Math.max(24, freq * 0.5);
+        addPeak(instL, subF, amp * 0.5 * subGL, 0.045);
+        addPeak(instR, subF, amp * 0.5 * subGR, 0.045);
+        addPeak(instL, freq * 2, amp * 0.35 * gL, 0.04);
+        addPeak(instR, freq * 2, amp * 0.35 * gR, 0.04);
+        addPeak(instL, freq * 3, amp * 0.2 * gL, 0.038);
+        addPeak(instR, freq * 3, amp * 0.2 * gR, 0.038);
+      } else {
+        const bodyF = magNorm > 0.55 ? Math.max(24, freq * 0.5) : freq * 1.5;
+        addPeak(instL, bodyF, amp * 0.55 * gL, 0.045);
+        addPeak(instR, bodyF, amp * 0.55 * gR, 0.045);
+        if (dt < 0.18) {
+          const pEnv = 1 - dt / 0.18;
+          addPeak(instL, freq * 2.1, amp * 0.45 * pEnv * gL, 0.04);
+          addPeak(instR, freq * 2.1, amp * 0.45 * pEnv * gR, 0.04);
+        }
+      }
+
+      for (let i = 0; i < waveLen; i++) {
+        const wt = tSec + (i / waveLen) * windowSec;
+        const s = Math.sin(2 * Math.PI * freq * wt) * amp * 0.55;
+        waveL[i] += s * subGL;
+        waveR[i] += s * subGR;
+      }
+    }
+
+    if (st.droneEnabled && droneWave) {
+      const rootF = this.audio.rootFreq || 36.7;
+      const lfo = 0.65 + 0.35 * Math.sin(2 * Math.PI * 0.07 * tSec);
+      const dAmp = 0.32 * vol * lfo;
+      addPeak(instDrone, rootF, dAmp, 0.05);
+      addPeak(instDrone, rootF * 1.5, dAmp * 0.55, 0.045);
+      for (let i = 0; i < waveLen; i++) {
+        const wt = tSec + (i / waveLen) * windowSec;
+        droneWave[i] = (Math.sin(2 * Math.PI * rootF * wt) + 0.4 * Math.sin(2 * Math.PI * rootF * 1.5 * wt)) * dAmp * 0.5;
+      }
+    }
+
+    // Match AnalyserNode smoothingTimeConstant (0.82 at 60fps)
+    const decay = Math.pow(0.82, Math.max(0.25, dtMs / 16.67));
+    const rise = 1 - decay;
+    for (let i = 0; i < numBins; i++) {
+      const tL = Math.min(1, instL[i]);
+      const tR = Math.min(1, instR[i]);
+      const tD = Math.min(1, instDrone[i]);
+      st.specBinsL[i] = st.specBinsL[i] * decay + tL * rise;
+      st.specBinsR[i] = st.specBinsR[i] * decay + tR * rise;
+      st.specDroneBins[i] = st.specDroneBins[i] * decay + tD * rise;
+    }
+
+    return {
+      left: { freqBins: st.specBinsL, wave: waveL, droneBins: st.droneEnabled ? st.specDroneBins : null, droneWave },
+      right: { freqBins: st.specBinsR, wave: waveR, droneBins: st.droneEnabled ? st.specDroneBins : null, droneWave },
+    };
   }
 
   _drawAudioSpectrum(dtMs = 16) {
@@ -759,6 +988,7 @@ class App {
       this.spectrumColorR[i] += (this.spectrumTargetR[i] - this.spectrumColorR[i]) * colorBlend;
     }
 
+    const offlineSpec = this._offlineRender?.active ? this._computeOfflineSpectrum(dtMs) : null;
     const enabled = Boolean(this.audio.analyserLeft && this.audio.analyserRight && this.audio.enabled);
     const droneAnalyser = enabled ? this.audio.droneAnalyser : null;
 
@@ -769,6 +999,7 @@ class App {
       enabled ? this.audio.analyserLeft : null,
       droneAnalyser,
       this.spectrumColorL,
+      offlineSpec?.left ?? null,
     );
     this._drawSpectrumChannel(
       this.audioCanvasRight,
@@ -777,10 +1008,11 @@ class App {
       enabled ? this.audio.analyserRight : null,
       droneAnalyser,
       this.spectrumColorR,
+      offlineSpec?.right ?? null,
     );
   }
 
-  _drawSpectrumChannel(canvas, ctx, dir, analyser, droneAnalyser, rgb) {
+  _drawSpectrumChannel(canvas, ctx, dir, analyser, droneAnalyser, rgb, offlineSpec = null) {
     const rect = canvas.getBoundingClientRect();
     const cssW = rect.width;
     const cssH = rect.height;
@@ -831,27 +1063,37 @@ class App {
       }
     }
 
-    if (analyser) {
-      const sampleRate = this.audio.ctx.sampleRate;
+    if (analyser || offlineSpec) {
+      const sampleRate = this.audio.ctx?.sampleRate || 48000;
       const spanW = Math.ceil(cssW);
 
-      const fillSpectrumArea = (sourceAnalyser, fillStyle) => {
-        const freqData = new Uint8Array(sourceAnalyser.frequencyBinCount);
-        sourceAnalyser.getByteFrequencyData(freqData);
-        const binHz = sampleRate / sourceAnalyser.fftSize;
-        const maxBin = freqData.length - 1;
+      const fillSpectrumArea = (sourceAnalyser, offlineBins, fillStyle) => {
+        const freqData = sourceAnalyser ? new Uint8Array(sourceAnalyser.frequencyBinCount) : null;
+        if (sourceAnalyser) sourceAnalyser.getByteFrequencyData(freqData);
+        const binHz = sourceAnalyser ? sampleRate / sourceAnalyser.fftSize : 1;
+        const maxBin = freqData ? freqData.length - 1 : 0;
+        const offMax = offlineBins ? offlineBins.length - 1 : 0;
 
         ctx.fillStyle = fillStyle;
         ctx.beginPath();
         ctx.moveTo(lowEdgeX, axisY);
         for (let offset = 0; offset <= spanW; offset += 1) {
           const t = Math.min(1, offset / cssW);
-          const freq = minFreq * Math.pow(maxFreq / minFreq, t);
-          const binFloat = freq / binHz;
-          const b0 = Math.min(maxBin, Math.floor(binFloat));
-          const b1 = Math.min(maxBin, b0 + 1);
-          const frac = binFloat - b0;
-          const v = (freqData[b0] * (1 - frac) + freqData[b1] * frac) / 255;
+          let v = 0;
+          if (offlineBins) {
+            const idxF = t * offMax;
+            const i0 = Math.floor(idxF);
+            const i1 = Math.min(offMax, i0 + 1);
+            const frac = idxF - i0;
+            v = offlineBins[i0] * (1 - frac) + offlineBins[i1] * frac;
+          } else {
+            const freq = minFreq * Math.pow(maxFreq / minFreq, t);
+            const binFloat = freq / binHz;
+            const b0 = Math.min(maxBin, Math.floor(binFloat));
+            const b1 = Math.min(maxBin, b0 + 1);
+            const frac = binFloat - b0;
+            v = (freqData[b0] * (1 - frac) + freqData[b1] * frac) / 255;
+          }
 
           const barH = v * (specH - 2);
           const x = dir < 0 ? cssW - offset : offset;
@@ -863,8 +1105,8 @@ class App {
       };
 
       // Draw Earth Drone spectrum behind the event spectrum in translucent blue
-      if (droneAnalyser) {
-        fillSpectrumArea(droneAnalyser, 'rgba(56, 189, 248, 0.28)');
+      if (droneAnalyser || offlineSpec?.droneBins) {
+        fillSpectrumArea(droneAnalyser, offlineSpec?.droneBins ?? null, 'rgba(56, 189, 248, 0.28)');
       }
 
       const r = Math.round(rgb[0]);
@@ -877,30 +1119,44 @@ class App {
       const grad = ctx.createLinearGradient(0, axisY, 0, specTop);
       grad.addColorStop(0, `rgb(${r}, ${g}, ${b})`);
       grad.addColorStop(1, `rgb(${rHi}, ${gHi}, ${bHi})`);
-      fillSpectrumArea(analyser, grad);
+      fillSpectrumArea(analyser, offlineSpec?.freqBins ?? null, grad);
 
-      const timeData = new Uint8Array(analyser.fftSize);
-      analyser.getByteTimeDomainData(timeData);
-      let droneTimeData = null;
-      if (droneAnalyser) {
-        droneTimeData = new Uint8Array(droneAnalyser.fftSize);
-        droneAnalyser.getByteTimeDomainData(droneTimeData);
-      }
       const midY = specTop + specH / 2;
       const width = Math.floor(cssW);
-      const step = Math.max(1, Math.floor(timeData.length / Math.max(1, width)));
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
       ctx.lineWidth = 1.25;
       ctx.beginPath();
-      for (let i = 0; i < width; i++) {
-        const idx = Math.min(timeData.length - 1, i * step);
-        let v = timeData[idx] / 128.0 - 1.0;
-        if (droneTimeData) {
-          v += droneTimeData[idx] / 128.0 - 1.0;
+      if (offlineSpec) {
+        const wData = offlineSpec.wave;
+        const dData = offlineSpec.droneWave;
+        const wMax = wData.length - 1;
+        for (let i = 0; i < width; i++) {
+          const idx = Math.min(wMax, Math.floor((i / Math.max(1, width - 1)) * wMax));
+          let v = wData[idx];
+          if (dData) v += dData[idx];
+          const y = midY + Math.max(-1, Math.min(1, v)) * (specH * 0.42);
+          if (i === 0) ctx.moveTo(i, y);
+          else ctx.lineTo(i, y);
         }
-        const y = midY + v * (specH * 0.42);
-        if (i === 0) ctx.moveTo(i, y);
-        else ctx.lineTo(i, y);
+      } else {
+        const timeData = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(timeData);
+        let droneTimeData = null;
+        if (droneAnalyser) {
+          droneTimeData = new Uint8Array(droneAnalyser.fftSize);
+          droneAnalyser.getByteTimeDomainData(droneTimeData);
+        }
+        const step = Math.max(1, Math.floor(timeData.length / Math.max(1, width)));
+        for (let i = 0; i < width; i++) {
+          const idx = Math.min(timeData.length - 1, i * step);
+          let v = timeData[idx] / 128.0 - 1.0;
+          if (droneTimeData) {
+            v += droneTimeData[idx] / 128.0 - 1.0;
+          }
+          const y = midY + v * (specH * 0.42);
+          if (i === 0) ctx.moveTo(i, y);
+          else ctx.lineTo(i, y);
+        }
       }
       ctx.stroke();
     } else {
@@ -1310,8 +1566,913 @@ class App {
     }
   }
 
+  _syncAudioUI(active) {
+    document.body.classList.toggle('audio-active', Boolean(active));
+    if (this.btnAudio) {
+      this.btnAudio.classList.toggle('active', Boolean(active));
+      this.btnAudio.title = active ? 'Mute Audio' : 'Start Audio';
+      this.btnAudio.setAttribute('aria-label', active ? 'Mute Audio' : 'Start Audio');
+    }
+  }
+
+  async ensureAudioStartedForRecording(channels, audioQuality) {
+    if (audioQuality) {
+      this.audio.setAudioQuality(audioQuality);
+    }
+    if (!this.audio.ctx || !this.audio.enabled) {
+      await this.audio.init();
+      this.audio.setVolume(Number(this.rangeVolume?.value ?? 80) / 100);
+      this.audio.setTimbre(this.selectTimbre?.value || 'tectonic');
+      this.audio.setScale(this.selectScale?.value || 'dorian');
+      this.audio.setRootFreq(Number(this.rangeRootFreq?.value ?? 36.7));
+      this.audio.setDrone(Boolean(this.toggleDrone?.checked));
+      this._syncAudioUI(true);
+    }
+    if (channels != null) {
+      this.audio.setRecordingChannelCount(channels);
+    }
+  }
+
+  getStreamProgress() {
+    if (!this.filteredQuakes.length) {
+      return { percent: 0, currentIndex: 0, totalEvents: 0 };
+    }
+    const first = this.filteredQuakes[0].time - 1000;
+    const last = this.filteredQuakes[this.filteredQuakes.length - 1].time + 60000;
+    const span = Math.max(1, last - first);
+    const pct = Math.max(0, Math.min(100, ((this.streamCursorTime - first) / span) * 100));
+    return {
+      percent: pct,
+      currentIndex: this.streamIdx,
+      totalEvents: this.filteredQuakes.length,
+      cursorTime: this.streamCursorTime,
+    };
+  }
+
+  setCleanUI(enabled) {
+    this.cleanUI = Boolean(enabled);
+    document.body.classList.toggle('asides-hidden', this.cleanUI);
+    document.body.classList.toggle('recorder-clean-ui', this.cleanUI);
+  }
+
+  async applyRecorderSettings(settings = {}) {
+    if (settings.feed && this.selectFeed) {
+      this.feedKey = settings.feed;
+      this.selectFeed.value = settings.feed;
+      if (this.statDatasetValue && DATASET_WINDOW_LABELS[settings.feed]) {
+        this.statDatasetValue.textContent = DATASET_WINDOW_LABELS[settings.feed];
+      }
+    }
+    if (settings.geojsonUrl) {
+      this.localGeoJsonUrl = settings.geojsonUrl;
+      this.dateRange = null;
+      if (this.statDatasetValue) this.statDatasetValue.textContent = 'Offline File';
+    } else if (settings.startDate) {
+      this.localGeoJsonUrl = null;
+      this.dateRange = {
+        startDate: settings.startDate,
+        endDate: settings.endDate || settings.startDate,
+      };
+      if (this.statDatasetValue) {
+        this.statDatasetValue.textContent =
+          this.dateRange.startDate === this.dateRange.endDate
+            ? this.dateRange.startDate
+            : `${this.dateRange.startDate}..${this.dateRange.endDate}`;
+      }
+    } else if (settings.resetSource) {
+      this.localGeoJsonUrl = null;
+      this.dateRange = null;
+    }
+
+    if (typeof settings.minMag === 'number') {
+      this.minMag = settings.minMag;
+      if (this.rangeMinMag) this.rangeMinMag.value = String(this.minMag);
+      if (this.valMinMag) this.valMinMag.textContent = `M${this.minMag.toFixed(1)}+`;
+    }
+    if (typeof settings.maxMag === 'number') {
+      this.maxMag = settings.maxMag;
+    }
+    if (typeof settings.speed === 'number' && settings.speed > 0) {
+      this.speedMultiplier = settings.speed;
+      const idx = SPEED_OPTIONS.indexOf(settings.speed);
+      if (idx >= 0 && this.rangeSpeed) {
+        this.rangeSpeed.value = String(idx + 1);
+      }
+      if (this.valSpeed) {
+        this.valSpeed.textContent = formatSpeedLabel(this.speedMultiplier);
+      }
+      this._preCenteredId = null;
+    }
+    if (settings.timbre && this.selectTimbre) {
+      this.selectTimbre.value = settings.timbre;
+      this.audio.setTimbre(settings.timbre);
+    }
+    if (settings.scale && this.selectScale) {
+      this.selectScale.value = settings.scale;
+      this.audio.setScale(settings.scale);
+    }
+    if (typeof settings.rootFreq === 'number' && this.rangeRootFreq) {
+      this.rangeRootFreq.value = String(settings.rootFreq);
+      this.audio.setRootFreq(settings.rootFreq);
+      if (this.valRootFreq) {
+        this.valRootFreq.textContent = `${settings.rootFreq.toFixed(1)} Hz (${freqToNote(settings.rootFreq)})`;
+      }
+    }
+    if (typeof settings.volume === 'number' && this.rangeVolume) {
+      this.rangeVolume.value = String(settings.volume);
+      this.audio.setVolume(settings.volume / 100);
+      if (this.valVolume) this.valVolume.textContent = `${Math.round(settings.volume)}%`;
+    }
+    if (typeof settings.channels === 'number' && !Number.isNaN(settings.channels)) {
+      this.audio.setChannelCount(settings.channels);
+      this.audio.setRecordingChannelCount(settings.channels);
+      this._syncChannelLayoutUI();
+    }
+    if (settings.audioQuality) {
+      this.audio.setAudioQuality(settings.audioQuality);
+    }
+    if (typeof settings.drone === 'boolean' && this.toggleDrone) {
+      this.toggleDrone.checked = settings.drone;
+      this.audio.setDrone(settings.drone);
+    }
+    if (typeof settings.plates === 'boolean' && this.togglePlates) {
+      this.togglePlates.checked = settings.plates;
+      this.map.setShowPlates(settings.plates);
+    }
+    if (typeof settings.cleanUI === 'boolean') {
+      this.setCleanUI(settings.cleanUI);
+    }
+
+    if (settings.reloadFeed) {
+      await this.loadFeed(true);
+    } else {
+      this._applyFilters(true);
+    }
+  }
+
+  _applyUrlOverrides() {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.toString()) return;
+
+    const overrides = {};
+    if (params.has('feed')) overrides.feed = params.get('feed');
+    if (params.has('geojson')) overrides.geojsonUrl = params.get('geojson');
+    if (params.has('date')) {
+      overrides.startDate = params.get('date');
+      overrides.endDate = params.get('date');
+    }
+    if (params.has('startDate')) overrides.startDate = params.get('startDate');
+    if (params.has('endDate')) overrides.endDate = params.get('endDate');
+    if (params.has('minMag')) overrides.minMag = Number(params.get('minMag'));
+    if (params.has('maxMag')) overrides.maxMag = Number(params.get('maxMag'));
+    if (params.has('speed')) overrides.speed = Number(params.get('speed'));
+    if (params.has('timbre')) overrides.timbre = params.get('timbre');
+    if (params.has('scale')) overrides.scale = params.get('scale');
+    if (params.has('rootFreq')) overrides.rootFreq = Number(params.get('rootFreq'));
+    if (params.has('volume')) overrides.volume = Number(params.get('volume'));
+    if (params.has('channels')) overrides.channels = Number(params.get('channels'));
+    if (params.has('audioQuality')) overrides.audioQuality = params.get('audioQuality');
+    if (params.has('drone')) overrides.drone = params.get('drone') === '1' || params.get('drone') === 'true';
+    if (params.has('plates')) overrides.plates = params.get('plates') === '1' || params.get('plates') === 'true';
+    if (params.has('cleanUI')) overrides.cleanUI = params.get('cleanUI') === '1' || params.get('cleanUI') === 'true';
+
+    this.applyRecorderSettings(overrides);
+  }
+
+  _exposeRecorderAPI() {
+    window.__SEISMIC_RECORDER__ = {
+      getState: () => ({
+        isRecording: this.recorder.isRecording,
+        eventCount: this.filteredQuakes.length,
+        totalRawCount: this.allQuakes.length,
+        speed: this.speedMultiplier,
+        ...this.getStreamProgress(),
+      }),
+      applySettings: (s) => this.applyRecorderSettings(s),
+      startRecording: (opts) => this.recorder.start(opts),
+      stopRecording: () => this.recorder.stop(),
+      prepareOfflineRender: async (opts = {}) => {
+        if (this._rafId) {
+          cancelAnimationFrame(this._rafId);
+          this._rafId = null;
+        }
+        this.isPaused = true;
+        this.audio.enabled = false;
+
+        const width = Math.max(320, Math.round((Number(opts.width) || 1920) / 2) * 2);
+        const height = Math.max(240, Math.round((Number(opts.height) || 1080) / 2) * 2);
+        const fps = Math.max(1, Math.min(240, Number(opts.fps) || 30));
+
+        if (!this._origPerfNow) {
+          this._origPerfNow = performance.now.bind(performance);
+        }
+        this._offlineRender = {
+          active: true,
+          clockMs: 0,
+          fps,
+          width,
+          height,
+          frameIndex: 0,
+          audioEvents: [],
+          cycleComplete: false,
+          droneEnabled: Boolean(opts.drone ?? this.droneEnabled),
+          frameFormat: opts.frameFormat === 'png' ? 'png' : 'jpeg',
+          specBinsL: new Float32Array(256),
+          specBinsR: new Float32Array(256),
+          specDroneBins: new Float32Array(256),
+          specEventStartIdx: 0,
+        };
+        performance.now = () => (this._offlineRender ? this._offlineRender.clockMs : this._origPerfNow());
+
+        this.mode = 'stream';
+        this._resetStreamCursor();
+        this.map.lastUserNavTime = 0;
+
+        this.recorder.compositeCanvas = document.createElement('canvas');
+        this.recorder.compositeCanvas.width = width;
+        this.recorder.compositeCanvas.height = height;
+        this.recorder.compositeCtx = this.recorder.compositeCanvas.getContext('2d', {
+          alpha: false,
+        });
+        this.recorder.compositeCtx.imageSmoothingEnabled = true;
+        this.recorder.compositeCtx.imageSmoothingQuality = 'high';
+
+        return {
+          width,
+          height,
+          fps,
+          totalEvents: this.filteredQuakes.length,
+        };
+      },
+      _renderOfflineFrame: async () => {
+        const st = this._offlineRender;
+        if (!st || !st.active) throw new Error('Offline render not prepared');
+
+        const dtMs = 1000 / st.fps;
+        if (st.frameIndex > 0) {
+          st.clockMs += dtMs;
+          this._stepStream(dtMs);
+        }
+        const now = st.clockMs;
+        this.map.setAudioTimeMs(now);
+        this.map.render(now);
+        this._updateEventCardWaves(now);
+        this._drawAudioSpectrum(dtMs);
+        this._drawSolarDial();
+        this.recorder._drawCompositeFrame();
+
+        const mime = st.frameFormat === 'png' ? 'image/png' : 'image/jpeg';
+        let frameBlob = await Promise.race([
+          new Promise((resolve) => {
+            if (mime === 'image/png') {
+              this.recorder.compositeCanvas.toBlob(resolve, 'image/png');
+            } else {
+              this.recorder.compositeCanvas.toBlob(resolve, 'image/jpeg', 0.94);
+            }
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('toBlob timed out after 30s')), 30000)),
+        ]);
+        if (!frameBlob) throw new Error('Failed to encode composite frame');
+        const frameBuf = await frameBlob.arrayBuffer();
+        frameBlob = null;
+        const frameIdx = st.frameIndex;
+        st.frameIndex += 1;
+        return { frameIdx, frameBuf, now };
+      },
+      _postOfflineFrame: async (frameEndpoint, frameIdx, frameBuf) => {
+        let res = null;
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const contentType = this._offlineRender?.frameFormat === 'png' ? 'image/png' : 'image/jpeg';
+            res = await fetch(frameEndpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': contentType,
+                'X-Frame-Index': String(frameIdx),
+                'X-Chunk-Final': '1',
+              },
+              body: frameBuf,
+              signal: AbortSignal.timeout(120000),
+            });
+            if (res.ok) {
+              await res.arrayBuffer();
+              break;
+            }
+            await res.body?.cancel().catch(() => {});
+            lastErr = new Error(`Frame upload failed: HTTP ${res.status}`);
+          } catch (err) {
+            lastErr = err;
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 50));
+          }
+        }
+        if (!res || !res.ok) throw lastErr || new Error('Frame upload failed');
+      },
+      stepAndPostFrame: async (frameEndpoint = '/__recorder_frame') => {
+        const st = this._offlineRender;
+        const api = window.__SEISMIC_RECORDER__;
+        const { frameIdx, frameBuf, now } = await api._renderOfflineFrame();
+        await api._postOfflineFrame(frameEndpoint, frameIdx, frameBuf);
+        const progress = this.getStreamProgress();
+        return {
+          done: st.cycleComplete,
+          frameIndex: st.frameIndex,
+          clockMs: now,
+          ...progress,
+        };
+      },
+      stepAndPostFrames: async (count = 30, frameEndpoint = '/__recorder_frame') => {
+        const st = this._offlineRender;
+        const api = window.__SEISMIC_RECORDER__;
+        const n = Math.max(1, Number(count) || 1);
+        let pendingPost = null;
+        let lastClockMs = st ? st.clockMs : 0;
+
+        for (let i = 0; i < n; i++) {
+          const { frameIdx, frameBuf, now } = await api._renderOfflineFrame();
+          lastClockMs = now;
+          if (pendingPost) await pendingPost;
+          pendingPost = api._postOfflineFrame(frameEndpoint, frameIdx, frameBuf);
+          if (st.cycleComplete) break;
+        }
+        if (pendingPost) await pendingPost;
+
+        const progress = this.getStreamProgress();
+        return {
+          done: st.cycleComplete,
+          frameIndex: st.frameIndex,
+          clockMs: lastClockMs,
+          ...progress,
+        };
+      },
+      renderOfflineAudioAndUpload: async (opts = {}, audioEndpoint = '/__recorder_audio') => {
+        const st = this._offlineRender;
+        if (!st) throw new Error('Offline render not prepared');
+        const durationSec = Math.max(0.5, st.clockMs / 1000 + 1.5);
+        const channels = Number(opts.channels ?? this.audio.recordingChannelCount ?? this.audio.channelCount ?? 2);
+        const audioQuality = opts.audioQuality || this.audio.audioQuality || 'high';
+
+        const rendered = await SeismicAudioEngine.renderOffline({
+          events: st.audioEvents,
+          durationSec,
+          channels,
+          audioQuality,
+          droneEnabled: Boolean(opts.drone ?? this.droneEnabled),
+          volume: this.audio.volume,
+          timbre: this.audio.timbre,
+          scale: this.audio.scale,
+          rootFreq: this.audio.rootFreq,
+        });
+        const wavBlob = encodeWavBlob(
+          rendered.chunks,
+          rendered.sampleRate,
+          rendered.channels,
+          rendered.bitDepth
+        );
+
+        const CHUNK_SIZE = 32 * 1024 * 1024;
+        const totalBytes = wavBlob.size;
+        for (let offset = 0, chunkIdx = 0; offset < totalBytes; offset += CHUNK_SIZE, chunkIdx += 1) {
+          const end = Math.min(totalBytes, offset + CHUNK_SIZE);
+          const slice = wavBlob.slice(offset, end);
+          const isFinal = end >= totalBytes;
+          const res = await fetch(audioEndpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'audio/wav',
+              'X-Audio-Channels': String(rendered.channels),
+              'X-Audio-Sample-Rate': String(rendered.sampleRate),
+              'X-Audio-Bit-Depth': String(rendered.bitDepth),
+              'X-Audio-Duration': String(rendered.durationSec),
+              'X-Chunk-Index': String(chunkIdx),
+              'X-Chunk-Final': isFinal ? '1' : '0',
+            },
+            body: slice,
+          });
+          if (!res.ok) throw new Error(`Audio upload failed: HTTP ${res.status}`);
+          await res.arrayBuffer();
+        }
+
+        st.active = false;
+        this._offlineRender = null;
+        if (this._origPerfNow) {
+          performance.now = this._origPerfNow;
+        }
+        return {
+          ok: true,
+          sizeBytes: wavBlob.size,
+          channels: rendered.channels,
+          sampleRate: rendered.sampleRate,
+          bitDepth: rendered.bitDepth,
+          durationSec: rendered.durationSec,
+        };
+      },
+      startAndUpload: async (opts, uploadEndpoint = '/__recorder_upload') => {
+        return new Promise((resolve, reject) => {
+          this.recorder.onError = (err) => reject(err);
+          this.recorder.onComplete = async (blob, meta) => {
+            try {
+              const res = await fetch(uploadEndpoint, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': meta.mimeType || 'video/webm',
+                  'X-Recorder-Filename': meta.filename || 'recording.webm',
+                  'X-Recorder-Events': String(this.filteredQuakes.length),
+                },
+                body: blob,
+              });
+              if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`);
+              resolve({ ok: true, sizeBytes: blob.size, mimeType: meta.mimeType, meta });
+            } catch (err) {
+              reject(err);
+            }
+          };
+          this.recorder.start({ ...opts, autoDownload: false }).catch(reject);
+        });
+      },
+    };
+  }
+
+  _bindRecorderModal() {
+    const btnOpen = document.getElementById('btn-recorder-open');
+    const backdrop = document.getElementById('recorder-modal-backdrop');
+    const btnClose = document.getElementById('btn-recorder-close');
+    const btnStart = document.getElementById('btn-rec-start');
+    const btnStop = document.getElementById('btn-rec-stop');
+    const btnDownload = document.getElementById('btn-rec-download');
+    const sourceSelect = document.getElementById('rec-source');
+    const dateRow = document.getElementById('rec-date-row');
+    const rangeRow = document.getElementById('rec-range-row');
+    const geojsonRow = document.getElementById('rec-geojson-row');
+    const geojsonInput = document.getElementById('rec-geojson-file');
+    const resSelect = document.getElementById('rec-resolution');
+    const customResRow = document.getElementById('rec-custom-res-row');
+    const widthInput = document.getElementById('rec-width');
+    const heightInput = document.getElementById('rec-height');
+    const fpsSelect = document.getElementById('rec-fps');
+    const offlineNotice = document.getElementById('rec-offline-notice');
+    const statusText = document.getElementById('rec-status-text');
+    const progressBar = document.getElementById('rec-progress-bar');
+    const channelsSelect = document.getElementById('rec-channels');
+    const audioQualitySelect = document.getElementById('rec-audio-quality');
+    const multichannelNote = document.getElementById('rec-multichannel-note');
+    const filenameInput = document.getElementById('rec-filename');
+    const recToast = document.getElementById('rec-toast');
+    const recToastText = document.getElementById('rec-toast-text');
+    const recToastClose = document.getElementById('rec-toast-close');
+    let toastTimer = null;
+
+    const showRecToast = (msg) => {
+      if (!recToast || !recToastText) return;
+      recToastText.textContent = msg;
+      recToast.classList.remove('hidden');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => recToast.classList.add('hidden'), 12000);
+    };
+    recToastClose?.addEventListener('click', () => recToast?.classList.add('hidden'));
+
+    const syncMultichannelNote = () => {
+      if (!multichannelNote) return;
+      const ch = Number(channelsSelect?.value || 2);
+      const aq = audioQualitySelect?.value || 'high';
+      if (ch > 2) {
+        multichannelNote.innerHTML = 'Browser video capture only encodes 2.0 (Stereo) Opus. A separate discrete multichannel <strong>.wav</strong> audio file will also be downloaded.';
+        multichannelNote.classList.remove('hidden');
+      } else if (aq === 'ultra') {
+        multichannelNote.innerHTML = 'Ultra Hi-Fi mode will also download a lossless <strong>32-bit float .wav</strong> master audio file.';
+        multichannelNote.classList.remove('hidden');
+      } else {
+        multichannelNote.classList.add('hidden');
+      }
+    };
+    channelsSelect?.addEventListener('change', syncMultichannelNote);
+    audioQualitySelect?.addEventListener('change', syncMultichannelNote);
+
+    if (!btnOpen || !backdrop) return;
+
+    const now = new Date();
+    const todayStr = formatLocalDateInput(now);
+    const yesterdayStr = formatLocalDateInput(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+    const singleDateEl = document.getElementById('rec-date');
+    const startDateEl = document.getElementById('rec-start-date');
+    const endDateEl = document.getElementById('rec-end-date');
+    if (singleDateEl && !singleDateEl.value) singleDateEl.value = yesterdayStr;
+    if (startDateEl && !startDateEl.value) startDateEl.value = yesterdayStr;
+    if (endDateEl && !endDateEl.value) endDateEl.value = todayStr;
+
+    const syncSourceRows = () => {
+      const mode = sourceSelect?.value || 'current';
+      if (dateRow) dateRow.classList.toggle('hidden', mode !== 'day');
+      if (rangeRow) rangeRow.classList.toggle('hidden', mode !== 'range');
+      if (geojsonRow) geojsonRow.classList.toggle('hidden', mode !== 'geojson');
+    };
+    sourceSelect?.addEventListener('change', syncSourceRows);
+    syncSourceRows();
+
+    const isAboveBrowserLimits = () => {
+      const resKey = resSelect?.value || '1080p';
+      let width = 1920;
+      let height = 1080;
+      if (resKey === 'custom') {
+        width = Number(widthInput?.value) || 1920;
+        height = Number(heightInput?.value) || 1080;
+      } else if (RESOLUTION_PRESETS[resKey]) {
+        width = RESOLUTION_PRESETS[resKey].width;
+        height = RESOLUTION_PRESETS[resKey].height;
+      }
+      const fps = Number(fpsSelect?.value ?? 30);
+      const hdrMode = document.getElementById('rec-hdr')?.value || 'off';
+      const resExceeded = width > 1920 || height > 1080;
+      const fpsExceeded = fps > 60;
+      const hdrExceeded = hdrMode !== 'off';
+      return {
+        exceeded: resExceeded || fpsExceeded || hdrExceeded,
+        resExceeded,
+        fpsExceeded,
+        hdrExceeded,
+        width,
+        height,
+        fps,
+      };
+    };
+
+    const syncBrowserLimitNotice = () => {
+      if (!offlineNotice) return;
+      const { exceeded } = isAboveBrowserLimits();
+      offlineNotice.classList.toggle('hidden', !exceeded);
+    };
+
+    const hdrSelect = document.getElementById('rec-hdr');
+    resSelect?.addEventListener('change', () => {
+      if (customResRow) customResRow.classList.toggle('hidden', resSelect.value !== 'custom');
+      syncBrowserLimitNotice();
+    });
+    fpsSelect?.addEventListener('change', syncBrowserLimitNotice);
+    hdrSelect?.addEventListener('change', syncBrowserLimitNotice);
+    widthInput?.addEventListener('input', syncBrowserLimitNotice);
+    heightInput?.addEventListener('input', syncBrowserLimitNotice);
+    syncBrowserLimitNotice();
+
+    const btnCopyCmd = document.getElementById('btn-rec-copy-cmd');
+    const btnExportCfg = document.getElementById('btn-rec-export-cfg');
+
+    const buildOfflinePythonConfig = () => {
+      const srcMode = sourceSelect?.value || 'current';
+      const minMag = Number(document.getElementById('rec-min-mag')?.value ?? 0);
+      const maxMag = Number(document.getElementById('rec-max-mag')?.value ?? 10);
+      const speed = Number(document.getElementById('rec-speed')?.value ?? 480);
+      const timbre = document.getElementById('rec-timbre')?.value || this.selectTimbre?.value || 'tectonic';
+      const scale = document.getElementById('rec-scale')?.value || this.selectScale?.value || 'dorian';
+      const rootFreq = Number(document.getElementById('rec-root-freq')?.value ?? this.audio.rootFreq ?? 36.7);
+      const channels = Number(document.getElementById('rec-channels')?.value ?? this.audio.channelCount ?? 2);
+      const drone = Boolean(document.getElementById('rec-drone')?.checked);
+      const plates = Boolean(document.getElementById('rec-plates')?.checked);
+      const cleanUI = Boolean(document.getElementById('rec-clean-ui')?.checked);
+      const quality = document.getElementById('rec-quality')?.value || 'medium';
+      const hdr = document.getElementById('rec-hdr')?.value || 'off';
+      const audioQuality = document.getElementById('rec-audio-quality')?.value || 'standard';
+
+      const resolution = resSelect?.value || '1080p';
+      let width = 1920;
+      let height = 1080;
+      const fps = Number(fpsSelect?.value ?? 30);
+
+      if (resolution === 'custom') {
+        width = Number(widthInput?.value) || 1920;
+        height = Number(heightInput?.value) || 1080;
+      } else if (RESOLUTION_PRESETS[resolution]) {
+        width = RESOLUTION_PRESETS[resolution].width;
+        height = RESOLUTION_PRESETS[resolution].height;
+      }
+
+      const cfg = {
+        date: srcMode === 'day' ? singleDateEl?.value || 'yesterday' : 'yesterday',
+        start_date: srcMode === 'range' ? startDateEl?.value || null : null,
+        end_date: srcMode === 'range' ? endDateEl?.value || null : null,
+        feed: null,
+        geojson: null,
+        offline: false,
+        min_mag: minMag,
+        max_mag: maxMag,
+        speed,
+        timbre,
+        scale,
+        root_freq: rootFreq,
+        volume: Math.round((this.audio?.volume ?? 0.8) * 100),
+        channels,
+        drone,
+        plates,
+        clean_ui: cleanUI,
+        resolution,
+        width,
+        height,
+        fps,
+        quality,
+        hdr,
+        audio_quality: audioQuality,
+        format: 'mkv',
+        output_dir: 'videos',
+        filename_template: 'seismic_{date}_{speed}x_{res}.{ext}',
+        max_duration: 3600,
+        headful: false,
+      };
+      if (srcMode === 'range' && cfg.start_date && cfg.end_date) {
+        cfg.date = null;
+      } else if (srcMode === 'current' && this.dateRange?.start && this.dateRange?.end) {
+        cfg.date = null;
+        cfg.start_date = this.dateRange.start;
+        cfg.end_date = this.dateRange.end;
+      }
+      return cfg;
+    };
+
+    const buildOfflinePythonCmd = (cfg) => {
+      const parts = ['python', 'recorder/record.py'];
+      if (cfg.start_date && cfg.end_date) {
+        parts.push('--start-date', cfg.start_date, '--end-date', cfg.end_date);
+      } else if (cfg.date) {
+        parts.push('--date', cfg.date);
+      }
+      parts.push(
+        '--min-mag', String(cfg.min_mag),
+        '--max-mag', String(cfg.max_mag),
+        '--speed', String(cfg.speed),
+        '--timbre', cfg.timbre,
+        '--scale', cfg.scale,
+        '--root-freq', String(cfg.root_freq),
+        '--channels', String(cfg.channels)
+      );
+      if (cfg.resolution === 'custom') {
+        parts.push('--width', String(cfg.width), '--height', String(cfg.height));
+      } else {
+        parts.push('--resolution', cfg.resolution);
+      }
+      parts.push(
+        '--fps', String(cfg.fps),
+        '--quality', cfg.quality,
+        '--audio-quality', cfg.audio_quality,
+        '--format', cfg.format,
+        '--output-dir', cfg.output_dir
+      );
+      if (cfg.hdr && cfg.hdr !== 'off') parts.push('--hdr', cfg.hdr);
+      if (cfg.drone) parts.push('--drone');
+      if (!cfg.plates) parts.push('--no-plates');
+      if (!cfg.clean_ui) parts.push('--no-clean-ui');
+      return parts.join(' ');
+    };
+
+    btnCopyCmd?.addEventListener('click', async () => {
+      const cmd = buildOfflinePythonCmd(buildOfflinePythonConfig());
+      try {
+        await navigator.clipboard.writeText(cmd);
+        showRecToast(`Copied offline Python command:\n${cmd}`);
+      } catch {
+        showRecToast(`Run in terminal:\n${cmd}`);
+      }
+    });
+
+    btnExportCfg?.addEventListener('click', () => {
+      const cfg = buildOfflinePythonConfig();
+      const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' });
+      triggerBlobDownload(blob, 'seismic_config.json');
+      showRecToast('Exported seismic_config.json — run: python recorder/record.py --config seismic_config.json');
+    });
+
+    let lastRecording = null;
+    let lastStartCapped = false;
+
+    const triggerBlobDownload = (blob, filename) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    };
+
+    const openModal = () => {
+      const recChannelsEl = document.getElementById('rec-channels');
+      if (recChannelsEl && this.audio && !this.recorder.isRecording) {
+        recChannelsEl.value = String(this.audio.recordingChannelCount ?? this.audio.channelCount ?? 2);
+      }
+      syncMultichannelNote();
+      syncBrowserLimitNotice();
+      btnStart?.classList.toggle('hidden', this.recorder.isRecording);
+      btnStop?.classList.toggle('hidden', !this.recorder.isRecording);
+      btnDownload?.classList.toggle('hidden', this.recorder.isRecording || !lastRecording);
+      backdrop.classList.remove('hidden');
+    };
+    const closeModal = () => {
+      backdrop.classList.add('hidden');
+    };
+
+    btnOpen.addEventListener('click', openModal);
+    btnClose?.addEventListener('click', closeModal);
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) closeModal();
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !backdrop.classList.contains('hidden')) {
+        closeModal();
+      }
+    });
+
+    filenameInput?.addEventListener('keydown', (e) => {
+      if (
+        e.key === 'Tab' &&
+        !e.shiftKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey &&
+        !filenameInput.value &&
+        filenameInput.placeholder
+      ) {
+        e.preventDefault();
+        filenameInput.value = filenameInput.placeholder;
+      }
+    });
+
+    let uploadedGeoJsonData = null;
+    geojsonInput?.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        uploadedGeoJsonData = JSON.parse(text);
+        if (statusText) statusText.textContent = `Loaded ${file.name}`;
+      } catch (err) {
+        if (statusText) statusText.textContent = `Invalid GeoJSON: ${err.message}`;
+      }
+    });
+
+    this.recorder.onProgress = ({ percent, currentIndex, totalEvents, elapsedMs }) => {
+      if (progressBar) progressBar.style.width = `${percent.toFixed(1)}%`;
+      const secs = Math.floor(elapsedMs / 1000);
+      if (statusText) {
+        statusText.textContent = `Recording… ${percent.toFixed(1)}% (${currentIndex}/${totalEvents} events · ${secs}s)`;
+      }
+    };
+
+    this.recorder.onComplete = (blob, meta) => {
+      btnStart?.classList.remove('hidden');
+      btnStop?.classList.add('hidden');
+      btnOpen.classList.remove('recording');
+      btnOpen.title = 'Offline Stream Recorder';
+      if (blob && blob.size > 0) {
+        const ext = (meta.mimeType || '').includes('mp4') ? '.mp4' : '.webm';
+        const safeVideoName = (meta.filename || 'recording.webm').replace(/\.(mp4|webm)$/i, '') + ext;
+        lastRecording = {
+          blob,
+          filename: safeVideoName,
+          wavBlob: meta.wavBlob || null,
+          wavFilename: meta.wavFilename || null,
+        };
+        btnDownload?.classList.remove('hidden');
+      }
+      if (progressBar) progressBar.style.width = '100%';
+      const mb = (blob.size / (1024 * 1024)).toFixed(2);
+      let msg = `Saved ${meta.filename} (${mb} MB)`;
+      if (meta.wavFilename && meta.wavSizeBytes > 0) {
+        const wavMb = (meta.wavSizeBytes / (1024 * 1024)).toFixed(2);
+        const khz = meta.wavSampleRate ? ` @ ${(meta.wavSampleRate / 1000).toFixed(meta.wavSampleRate % 1000 === 0 ? 0 : 1)}kHz` : '';
+        const bits = meta.wavBitDepth ? `${meta.wavBitDepth}-bit` : 'PCM';
+        msg += ` + additional ${meta.wavChannels}ch ${bits}${khz} audio: ${meta.wavFilename} (${wavMb} MB)`;
+      }
+      if (lastStartCapped) {
+        msg += ' — Capped at max browser settings (1080p / 60 FPS); use Python (recorder/record.py) for true capture.';
+      }
+      if (statusText) {
+        statusText.textContent = msg;
+      }
+      showRecToast(msg);
+    };
+
+    this.recorder.onError = (err) => {
+      btnStart?.classList.remove('hidden');
+      btnStop?.classList.add('hidden');
+      btnOpen.classList.remove('recording');
+      btnOpen.title = 'Offline Stream Recorder';
+      if (statusText) statusText.textContent = `Error: ${err.message}`;
+    };
+
+    btnStart?.addEventListener('click', async () => {
+      try {
+        btnStart.disabled = true;
+        if (statusText) statusText.textContent = 'Preparing stream & audio…';
+
+        const srcMode = sourceSelect?.value || 'current';
+        const minMag = Number(document.getElementById('rec-min-mag')?.value ?? 0);
+        const maxMag = Number(document.getElementById('rec-max-mag')?.value ?? 10);
+        const speed = Number(document.getElementById('rec-speed')?.value ?? 480);
+        const timbre = document.getElementById('rec-timbre')?.value || this.selectTimbre?.value;
+        const scale = document.getElementById('rec-scale')?.value || this.selectScale?.value;
+        const rootFreq = Number(document.getElementById('rec-root-freq')?.value ?? this.audio.rootFreq);
+        const channels = Number(document.getElementById('rec-channels')?.value ?? this.audio.channelCount ?? 2);
+        const drone = Boolean(document.getElementById('rec-drone')?.checked);
+        const plates = Boolean(document.getElementById('rec-plates')?.checked);
+        const cleanUI = Boolean(document.getElementById('rec-clean-ui')?.checked);
+        const captureMode = document.getElementById('rec-capture-mode')?.value || 'canvas';
+        const limits = isAboveBrowserLimits();
+        const fps = Math.min(60, Math.max(15, limits.fps));
+        const quality = document.getElementById('rec-quality')?.value || 'medium';
+        const audioQuality = document.getElementById('rec-audio-quality')?.value || 'standard';
+        const filename = document.getElementById('rec-filename')?.value?.trim() || undefined;
+
+        const width = Math.min(1920, Math.max(320, limits.width));
+        const height = Math.min(1080, Math.max(240, limits.height));
+        lastStartCapped = limits.exceeded;
+        if (limits.exceeded) {
+          showRecToast('Browser output is limited to 1080p / 60 FPS — recording with max browser settings. Use Python (recorder/record.py) for true capture.');
+        }
+
+        const settings = {
+          minMag,
+          maxMag,
+          speed,
+          timbre,
+          scale,
+          rootFreq,
+          channels,
+          audioQuality,
+          drone,
+          plates,
+          cleanUI,
+          reloadFeed: false,
+        };
+
+        if (srcMode === 'day') {
+          settings.startDate = singleDateEl?.value || yesterdayStr;
+          settings.endDate = settings.startDate;
+          settings.reloadFeed = true;
+        } else if (srcMode === 'range') {
+          settings.startDate = startDateEl?.value || yesterdayStr;
+          settings.endDate = endDateEl?.value || todayStr;
+          settings.reloadFeed = true;
+        } else if (srcMode === 'geojson' && uploadedGeoJsonData) {
+          const parsed = parseGeoJsonPayload(uploadedGeoJsonData);
+          this.allQuakes = parsed.events;
+          this.localGeoJsonUrl = null;
+          this.dateRange = null;
+        } else {
+          settings.resetSource = true;
+          settings.reloadFeed = false;
+        }
+
+        await this.applyRecorderSettings(settings);
+
+        lastRecording = null;
+        btnDownload?.classList.add('hidden');
+        btnStart.classList.add('hidden');
+        btnStop?.classList.remove('hidden');
+        btnOpen.classList.add('recording');
+        btnOpen.title = 'Recording in progress — Click to open Recorder / Stop & Save';
+        if (progressBar) progressBar.style.width = '0%';
+
+        await this.recorder.start({
+          width,
+          height,
+          fps,
+          quality,
+          audioQuality,
+          channels,
+          captureMode,
+          filename,
+          autoDownload: true,
+          stopOnCycleEnd: true,
+        });
+      } catch (err) {
+        console.error(err);
+        btnStart.classList.remove('hidden');
+        btnStop?.classList.add('hidden');
+        btnOpen.classList.remove('recording');
+        btnOpen.title = 'Offline Stream Recorder';
+        if (statusText) statusText.textContent = `Error: ${err.message}`;
+      } finally {
+        btnStart.disabled = false;
+      }
+    });
+
+    btnStop?.addEventListener('click', async () => {
+      btnStop.disabled = true;
+      await this.recorder.stop();
+      btnStop.disabled = false;
+    });
+
+    btnDownload?.addEventListener('click', () => {
+      if (!lastRecording) return;
+      if (lastRecording.blob && lastRecording.blob.size > 0) {
+        triggerBlobDownload(lastRecording.blob, lastRecording.filename);
+      }
+      if (lastRecording.wavBlob && lastRecording.wavBlob.size > 0 && lastRecording.wavFilename) {
+        setTimeout(() => triggerBlobDownload(lastRecording.wavBlob, lastRecording.wavFilename), 250);
+      }
+    });
+  }
+
   _loop(now) {
-    if (this.isPaused) return;
+    if (this.isPaused || this._offlineRender?.active) return;
 
     const dt = Math.min(100, now - this.lastFrameTime);
     this.lastFrameTime = now;
@@ -1320,10 +2481,9 @@ class App {
     this.map.setAudioTimeMs(this.audio.getAudioTimeMs());
     this.map.render(now);
     this._updateEventCardWaves(now);
-    this.audio.updatePanning((lon, lat) => this.map.getStereoPan(lon, lat));
+    this.audio.updatePanning((lon, lat) => this.map.getSolarSpatialPan(lon, lat));
     this._drawAudioSpectrum(dt);
     this._drawSolarDial();
-    this._updateMapTzPill();
 
     this._rafId = requestAnimationFrame((t) => this._loop(t));
   }

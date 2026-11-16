@@ -23,21 +23,77 @@ export function normalizeFeature(feature) {
   };
 }
 
-export async function fetchEarthquakes(feedKey = 'all_day') {
-  const url = FEED_URLS[feedKey] || FEED_URLS.all_day;
-  const response = await fetch(url, { cache: 'no-store' });
-  if (!response.ok) {
-    throw new Error(`USGS feed error: HTTP ${response.status}`);
-  }
-  const data = await response.json();
-  const events = (data.features || [])
+export function parseGeoJsonPayload(data) {
+  const events = (data?.features || [])
     .map(normalizeFeature)
     .filter((q) => Number.isFinite(q.lat) && Number.isFinite(q.lon))
     .sort((a, b) => a.time - b.time); // Chronological oldest -> newest
 
   return {
     events,
-    generated: data.metadata?.generated || Date.now(),
-    title: data.metadata?.title || 'USGS Earthquakes',
+    generated: data?.metadata?.generated || Date.now(),
+    title: data?.metadata?.title || 'USGS Earthquakes',
   };
+}
+
+export async function fetchEarthquakesFromUrl(url) {
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`USGS feed error: HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  return parseGeoJsonPayload(data);
+}
+
+export async function fetchEarthquakes(feedKey = 'all_day') {
+  const url = FEED_URLS[feedKey] || FEED_URLS.all_day;
+  return fetchEarthquakesFromUrl(url);
+}
+
+/**
+ * Converts a local YYYY-MM-DD date string to an ISO-8601 UTC timestamp for the
+ * start (00:00:00.000) or end (23:59:59.999) of that local calendar day.
+ * Explicit timestamps containing 'T' are returned unchanged.
+ */
+function localDateBoundaryToIso(dateStr, isEnd = false) {
+  if (dateStr.includes('T')) return dateStr;
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = isEnd
+    ? new Date(y, m - 1, d, 23, 59, 59, 999)
+    : new Date(y, m - 1, d, 0, 0, 0, 0);
+  return dt.toISOString();
+}
+
+/**
+ * Fetches earthquakes for an explicit local date or date range via the USGS FDSN Event API.
+ * @param {object} opts
+ * @param {string} opts.startDate Local date ('YYYY-MM-DD') or ISO timestamp
+ * @param {string} [opts.endDate] Local date ('YYYY-MM-DD') or ISO timestamp (defaults to end of startDate local day)
+ * @param {number} [opts.minMag]
+ * @param {number} [opts.maxMag]
+ */
+export async function fetchEarthquakesByRange({ startDate, endDate, minMag, maxMag } = {}) {
+  if (!startDate) {
+    return fetchEarthquakes('all_day');
+  }
+  const startIso = localDateBoundaryToIso(startDate, false);
+  const effectiveEnd = endDate || startDate;
+  const endIso = localDateBoundaryToIso(effectiveEnd, true);
+
+  const params = new URLSearchParams({
+    format: 'geojson',
+    starttime: startIso,
+    endtime: endIso,
+    orderby: 'time-asc',
+    limit: '20000',
+  });
+  if (typeof minMag === 'number' && Number.isFinite(minMag) && minMag > 0) {
+    params.set('minmagnitude', String(minMag));
+  }
+  if (typeof maxMag === 'number' && Number.isFinite(maxMag) && maxMag < 10) {
+    params.set('maxmagnitude', String(maxMag));
+  }
+
+  const url = `https://earthquake.usgs.gov/fdsnws/event/1/query?${params.toString()}`;
+  return fetchEarthquakesFromUrl(url);
 }
