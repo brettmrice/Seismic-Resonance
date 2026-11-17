@@ -108,6 +108,8 @@ class App {
     this.isPaused = false;
     this.isStreamPaused = false;
     this.isReadmeOpen = false;
+    this.isRecorderOpen = false;
+    this._urlCleanUI = false;
     this._prePauseFeedStatus = null;
     this.pauseStartedAt = 0;
     this.wasAudioRunning = false;
@@ -455,13 +457,13 @@ class App {
         this._topBarIdleTimer = null;
       }
       this._idleTimer = setTimeout(() => {
-        if (!this.isPaused && !this.cleanUI) {
+        if (!this.isPaused && !this.cleanUI && !this.isRecorderOpen) {
           document.body.classList.add('asides-hidden');
           if (this.map?._manualNavHold || Math.abs((this.map?.zoom ?? 1) - 1) > 0.01) {
             this._resetViewToCurrentPosition();
           }
           this._topBarIdleTimer = setTimeout(() => {
-            if (!this.isPaused && !this.cleanUI) {
+            if (!this.isPaused && !this.cleanUI && !this.isRecorderOpen) {
               document.body.classList.add('top-bar-hidden');
               this.map?.setAutoZoomEnabled(true);
               if (this.map?.canAutoTransition()) {
@@ -496,6 +498,7 @@ class App {
       window.addEventListener(evt, resetIdleTimer, { passive: true });
     }
 
+    this._resetIdleTimer = resetIdleTimer;
     resetIdleTimer();
   }
 
@@ -1953,7 +1956,10 @@ class App {
     if (params.has('audioQuality')) overrides.audioQuality = params.get('audioQuality');
     if (params.has('drone')) overrides.drone = params.get('drone') === '1' || params.get('drone') === 'true';
     if (params.has('plates')) overrides.plates = params.get('plates') === '1' || params.get('plates') === 'true';
-    if (params.has('cleanUI')) overrides.cleanUI = params.get('cleanUI') === '1' || params.get('cleanUI') === 'true';
+    if (params.has('cleanUI')) {
+      overrides.cleanUI = params.get('cleanUI') === '1' || params.get('cleanUI') === 'true';
+      this._urlCleanUI = overrides.cleanUI;
+    }
 
     this.applyRecorderSettings(overrides);
   }
@@ -2459,6 +2465,14 @@ class App {
 
     let lastRecording = null;
     let lastStartCapped = false;
+    let preRecordCleanUI = this.cleanUI;
+
+    const restoreCleanUI = () => {
+      if (this.cleanUI !== preRecordCleanUI && !this._urlCleanUI) {
+        this.setCleanUI(preRecordCleanUI);
+        this._resetIdleTimer?.();
+      }
+    };
 
     const triggerBlobDownload = (blob, filename) => {
       const url = URL.createObjectURL(blob);
@@ -2472,6 +2486,7 @@ class App {
     };
 
     const openModal = () => {
+      this.isRecorderOpen = true;
       const recChannelsEl = document.getElementById('rec-channels');
       if (recChannelsEl && this.audio && !this.recorder.isRecording) {
         recChannelsEl.value = String(this.audio.recordingChannelCount ?? this.audio.channelCount ?? 2);
@@ -2482,9 +2497,16 @@ class App {
       btnStop?.classList.toggle('hidden', !this.recorder.isRecording);
       btnDownload?.classList.toggle('hidden', this.recorder.isRecording || !lastRecording);
       backdrop.classList.remove('hidden');
+      this._resetIdleTimer?.();
     };
     const closeModal = () => {
+      this.isRecorderOpen = false;
       backdrop.classList.add('hidden');
+      if (!this.recorder.isRecording && this.cleanUI && !this._urlCleanUI) {
+        this.setCleanUI(false);
+      }
+      this._resetIdleTimer?.();
+      btnOpen.focus();
     };
 
     btnOpen.addEventListener('click', openModal);
@@ -2535,6 +2557,7 @@ class App {
     };
 
     this.recorder.onComplete = (blob, meta) => {
+      restoreCleanUI();
       btnStart?.classList.remove('hidden');
       btnStop?.classList.add('hidden');
       btnOpen.classList.remove('recording');
@@ -2569,6 +2592,7 @@ class App {
     };
 
     this.recorder.onError = (err) => {
+      restoreCleanUI();
       btnStart?.classList.remove('hidden');
       btnStop?.classList.add('hidden');
       btnOpen.classList.remove('recording');
@@ -2639,6 +2663,7 @@ class App {
           settings.reloadFeed = false;
         }
 
+        preRecordCleanUI = this.cleanUI;
         await this.applyRecorderSettings(settings);
 
         lastRecording = null;
@@ -2663,6 +2688,7 @@ class App {
         });
       } catch (err) {
         console.error(err);
+        restoreCleanUI();
         btnStart.classList.remove('hidden');
         btnStop?.classList.add('hidden');
         btnOpen.classList.remove('recording');
