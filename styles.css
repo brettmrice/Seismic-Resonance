@@ -96,15 +96,20 @@ body.top-bar-hidden .top-bar * {
 }
 
 .brand {
-  display: grid;
-  grid-auto-flow: column;
-  align-content: center;
-  align-items: stretch;
-  gap: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   height: 100%;
   border-radius: 12px;
-  padding: 0 18px;
+  padding: 0 16px;
   pointer-events: auto;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
 }
 
 .brand-pulse {
@@ -136,14 +141,16 @@ body.top-bar-hidden .top-bar * {
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.14em;
+  line-height: 1.2;
+  white-space: nowrap;
   color: #f8fafc;
 }
 
 .brand-stream-btn,
 .brand-rec-btn,
 .brand-help-btn {
-  height: auto;
-  aspect-ratio: 1;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   padding: 0;
   border: 1px solid rgba(148, 163, 184, 0.28);
@@ -209,8 +216,10 @@ body.top-bar-hidden .top-bar * {
 
 .subtitle {
   font-size: 11px;
+  line-height: 1.2;
   color: var(--text-muted);
-  margin-top: 1px;
+  margin-top: 2px;
+  white-space: nowrap;
 }
 
 body.asides-hidden .brand .subtitle,
@@ -222,30 +231,40 @@ body.asides-hidden .map-mode-bar {
 }
 
 .map-mode-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  padding: 3px 3px 3px 11px;
+  gap: 8px;
+}
+
+.map-mode-bar .map-mode-toggle {
+  grid-template-columns: repeat(2, minmax(36px, 1fr));
+  height: 26px;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 6px;
+}
+
+.map-mode-bar .map-mode-toggle button {
   height: 100%;
-  border-radius: 12px;
-  padding: 0 12px;
-  pointer-events: auto;
-}
-
-.map-mode-toggle {
-  grid-template-columns: repeat(2, minmax(38px, 1fr));
-}
-
-.map-mode-toggle button {
-  padding: 5px 10px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
+  line-height: 1;
+}
+
+.map-mode-bar .map-mode-toggle button.active {
+  border-color: rgba(255, 107, 53, 0.4);
 }
 
 .header-stats {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   height: 100%;
   border-radius: 12px;
   padding: 0 12px;
@@ -256,13 +275,14 @@ body.asides-hidden .map-mode-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 11px;
+  height: 34px;
+  padding: 0 11px;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.header-stats .stat-pill:nth-child(2) {
+.header-stats .stat-pill-summary {
   flex: 0 0 auto;
   justify-content: space-between;
   white-space: nowrap;

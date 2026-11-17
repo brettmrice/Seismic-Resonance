@@ -832,11 +832,11 @@ class App {
   }
 
   _magToAutoZoom(mag) {
-    // Zoom in on low magnitudes (~1.75x at M1.0) and zoom out on high magnitudes (~0.78x at M7.5+)
+    // Zoom in on low magnitudes (~2.75x at M1.0) and zoom out on high magnitudes (~0.78x at M7.5+)
     const m = Number.isFinite(mag) ? mag : 4.5;
     const t = Math.max(0, Math.min(1, (m - 1.0) / 6.5));
     const minZoom = 0.78;
-    const maxZoom = 1.75;
+    const maxZoom = 2.75;
     return maxZoom * Math.pow(minZoom / maxZoom, t);
   }
 

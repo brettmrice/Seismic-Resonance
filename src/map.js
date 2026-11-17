@@ -105,6 +105,17 @@ function smoothDamp(current, target, velocity, smoothTime, dt, maxSpeed = Infini
   return [nextPos, nextVel];
 }
 
+// Shared GLSL interleaved gradient noise (Jimenez 2014) to eliminate 8-bit color banding
+const GLSL_DITHER_FN = /* glsl */ `
+  float ignDither(vec2 coord) {
+    vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(coord, magic.xy))) - 0.5;
+  }
+  vec3 dither8Bit(vec3 col, vec2 coord) {
+    return max(col + ignDither(coord) / 255.0, 0.0);
+  }
+`;
+
 // Shared GLSL vertex morph function: (lon, lat, rFrac) -> morphed 2D/3D position centered on view
 const GLSL_MORPH_FN = /* glsl */ `
   const float DEG2RAD = 0.017453292519943295;
@@ -269,6 +280,7 @@ export class SeismicMap {
     this._transStartPanX = 0;
     this._transStartPanY = 0;
     this._transDeltaPanX = 0;
+    this._transDeltaPanY = 0;
     this._transStartLon = 0;
     this._transStartLat = 0;
     this._transDeltaLon = 0;
@@ -350,7 +362,7 @@ export class SeismicMap {
     this._buildAtmosphereGlow();
     this._buildOceanLayer();
     this._buildGraticuleLayer();
-    this._buildSunReticle();
+    this._buildSunLight();
     this._buildQuakeDiscLayer();
     this._buildWavePool();
   }
@@ -375,11 +387,13 @@ export class SeismicMap {
       fragmentShader: /* glsl */ `
         uniform float uMorph;
         varying vec2 vUv;
+        ${GLSL_DITHER_FN}
         void main() {
           float d = length(vUv - 0.5) * 2.0;
           float rim = smoothstep(0.58, 0.77, d) * (1.0 - smoothstep(0.77, 1.0, d));
           float alpha = rim * 0.24 * uMorph;
           if (alpha < 0.002) discard;
+          alpha = max(alpha + ignDither(gl_FragCoord.xy) / 255.0, 0.0);
           gl_FragColor = vec4(0.22, 0.74, 0.97, alpha);
         }
       `,
@@ -459,6 +473,7 @@ export class SeismicMap {
           uniform float uTileAlpha;
           varying vec3 vSphereNormal;
           varying vec3 vWorldPos;
+          ${GLSL_DITHER_FN}
 
           void main() {
             if (uTileAlpha < 0.01) discard;
@@ -471,18 +486,24 @@ export class SeismicMap {
             vec3 base2D = vec3(0.024, 0.036, 0.062);
             vec3 col = mix(base2D, base3D, uMorph);
 
-            // Real-time solar illumination & dusk terminator
-            float sunDot = dot(n, normalize(uSunDir));
+            // Real-time solar illumination
+            vec3 sunDirN = normalize(uSunDir);
+            float sunDot = dot(n, sunDirN);
             float dayFactor = clamp((sunDot + 0.08) / 1.08, 0.0, 1.0);
-            float duskBand = exp(-pow(sunDot / 0.14, 2.0));
 
             col += vec3(0.14, 0.23, 0.36) * pow(dayFactor, 1.15) * 0.55;
-            col += vec3(0.28, 0.16, 0.07) * duskBand * 0.32;
 
-            // Subtle 3D horizon rim
+            // Solar specular glint on the ocean
+            vec3 halfVec = normalize(sunDirN + viewDir);
+            float specBroad = pow(max(dot(n, halfVec), 0.0), 28.0) * smoothstep(-0.05, 0.25, sunDot);
+            float specTight = pow(max(dot(n, halfVec), 0.0), 160.0) * smoothstep(0.0, 0.2, sunDot);
+            col += vec3(1.0, 0.88, 0.65) * (specBroad * 0.18 + specTight * 0.45);
+
+            // 3D horizon rim (brighter on sunlit limb)
             float rim = pow(1.0 - ndotv, 3.2) * uMorph;
-            col += vec3(0.12, 0.35, 0.55) * rim * 0.25;
+            col += vec3(0.12, 0.35, 0.55) * rim * (0.15 + 0.35 * dayFactor);
 
+            col = dither8Bit(col, gl_FragCoord.xy);
             gl_FragColor = vec4(col, uTileAlpha);
           }
         `,
@@ -561,39 +582,47 @@ export class SeismicMap {
     }
   }
 
-  _buildSunReticle() {
+  _buildSunLight() {
+    this._sunLight = new THREE.DirectionalLight(0xfff4d6, 1.0);
+    this._sunLight.position.set(0, 0, 50);
+    this._sunLight.target.position.set(0, 0, 0);
+    this.scene.add(this._sunLight);
+    this.scene.add(this._sunLight.target);
+
+    // Visible distant Sun orb + additive corona anchored at the light source
+    const orbGeom = new THREE.SphereGeometry(0.42, 32, 24);
+    const orbMat = new THREE.MeshBasicMaterial({
+      color: 0xfff8e1,
+      depthWrite: true,
+      depthTest: true,
+    });
+    this._sunOrb = new THREE.Mesh(orbGeom, orbMat);
+    this._sunOrb.renderOrder = 3;
+    this._sunLight.add(this._sunOrb);
+
     const c = document.createElement('canvas');
-    c.width = 64;
-    c.height = 64;
+    c.width = 128;
+    c.height = 128;
     const ctx = c.getContext('2d');
-
-    const grad = ctx.createRadialGradient(32, 32, 2, 32, 32, 28);
-    grad.addColorStop(0, 'rgba(255, 232, 160, 0.75)');
-    grad.addColorStop(0.4, 'rgba(255, 195, 85, 0.25)');
-    grad.addColorStop(1, 'rgba(255, 180, 60, 0)');
+    const grad = ctx.createRadialGradient(64, 64, 4, 64, 64, 64);
+    grad.addColorStop(0, 'rgba(255, 248, 220, 0.95)');
+    grad.addColorStop(0.22, 'rgba(255, 220, 140, 0.55)');
+    grad.addColorStop(0.55, 'rgba(255, 175, 70, 0.16)');
+    grad.addColorStop(1, 'rgba(255, 150, 40, 0)');
     ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(32, 32, 28, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(0, 0, 128, 128);
 
-    ctx.strokeStyle = 'rgba(255, 224, 130, 0.75)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(32, 32, 8, 0, Math.PI * 2);
-    ctx.stroke();
-
-    this._sunLabelTex = new THREE.CanvasTexture(c);
-
-    const mat = new THREE.SpriteMaterial({
-      map: this._sunLabelTex,
+    this._sunCoronaTex = new THREE.CanvasTexture(c);
+    const coronaMat = new THREE.SpriteMaterial({
+      map: this._sunCoronaTex,
       transparent: true,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
       depthTest: true,
-      opacity: 0.85,
     });
-    this._sunSprite = new THREE.Sprite(mat);
-    this._sunSprite.renderOrder = 4;
-    this.scene.add(this._sunSprite);
+    this._sunCorona = new THREE.Sprite(coronaMat);
+    this._sunCorona.renderOrder = 3;
+    this._sunLight.add(this._sunCorona);
   }
 
   _buildPlateLayer() {
@@ -761,6 +790,7 @@ export class SeismicMap {
           uniform float uTileAlpha;
           varying vec3 vNormal;
           varying vec3 vWorldPos;
+          ${GLSL_DITHER_FN}
           void main() {
             if (uTileAlpha < 0.01) discard;
             vec3 n = normalize(vNormal);
@@ -775,6 +805,7 @@ export class SeismicMap {
             vec3 col = mix(glassBase, frostHighlight, fresnel * 0.42 + sunDot * 0.14);
 
             float alpha = clamp(0.52 + fresnel * 0.16, 0.48, 0.68) * uTileAlpha;
+            col = dither8Bit(col, gl_FragCoord.xy);
             gl_FragColor = vec4(col, alpha);
           }
         `,
@@ -906,6 +937,8 @@ export class SeismicMap {
       this.zoom = Math.max(1, Math.min(10, this.zoom));
       this.onZoomChange?.(this.zoom);
     } else if (nextMode === '2d' && prevMode === '3d') {
+      this.zoom = Math.max(1, Math.min(12, this.zoom));
+      this.onZoomChange?.(this.zoom);
       const worldW = this.bounds.w * this.zoom;
       if (worldW > 0) {
         this.panX = -(this.rotLon / 360) * worldW;
@@ -1057,14 +1090,23 @@ export class SeismicMap {
         this._transDeltaLon = normalizeLon(lon - this.rotLon);
         this._transDeltaLat = targetLat - this.rotLat;
       } else {
-        this._transStartPanX = this.panX;
-        this._transStartPanY = this.panY;
+        const startZoom = this.zoom || 1;
+        this._transStartPanX = this.panX / startZoom;
+        this._transStartPanY = this.panY / startZoom;
         const baseW = this.bounds.w;
-        let targetPanX = -(lon / 360) * baseW;
-        targetPanX = ((((targetPanX + baseW / 2) % baseW) + baseW) % baseW) - baseW / 2;
-        let dx = targetPanX - this.panX;
-        dx = ((((dx + baseW / 2) % baseW) + baseW) % baseW) - baseW / 2;
-        this._transDeltaPanX = dx;
+        const baseH = this.bounds.h;
+        if (baseW > 0 && baseH > 0) {
+          let targetPanX = -(lon / 360) * baseW;
+          targetPanX = ((((targetPanX + baseW / 2) % baseW) + baseW) % baseW) - baseW / 2;
+          let dx = targetPanX - this._transStartPanX;
+          dx = ((((dx + baseW / 2) % baseW) + baseW) % baseW) - baseW / 2;
+          this._transDeltaPanX = dx;
+          const targetPanY = (targetLat / 180) * baseH;
+          this._transDeltaPanY = targetPanY - this._transStartPanY;
+        } else {
+          this._transDeltaPanX = 0;
+          this._transDeltaPanY = 0;
+        }
       }
       this._autoTransitionActive = true;
     }
@@ -1315,7 +1357,7 @@ export class SeismicMap {
         this.onZoomChange?.(this.zoom);
       } else {
         const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-        const newZoom = Math.max(1, Math.min(10, this.zoom * factor));
+        const newZoom = Math.max(0.45, Math.min(10, this.zoom * factor));
         if (newZoom === this.zoom) return;
 
         this.zoom = newZoom;
@@ -1476,6 +1518,16 @@ export class SeismicMap {
     }
   }
 
+  _rescalePanForZoom(prevZoom) {
+    if (!prevZoom || this.zoom === prevZoom) return;
+    const scaleRatio = this.zoom / prevZoom;
+    this.panX *= scaleRatio;
+    this.panY *= scaleRatio;
+    this._camVelPanX *= scaleRatio;
+    this._camVelPanY *= scaleRatio;
+    this._clampPan();
+  }
+
   _updateAutoCamera(now) {
     if (this._autoFollowActive && !this.isDragging && !this._morphActive && this.canAutoTransition(now)) {
       const dt = this._lastAutoCamTime !== null
@@ -1483,6 +1535,7 @@ export class SeismicMap {
         : 1 / 60;
       this._lastAutoCamTime = now;
 
+      const prevZoom = this.zoom || 1;
       const targetZoom = this._autoZoomEnabled ? this._autoFollowTargetZoom : 1;
       if (Math.abs(this.zoom - targetZoom) > 0.003) {
         const [nextZoom, nextZoomVel] = smoothDamp(
@@ -1490,10 +1543,12 @@ export class SeismicMap {
         );
         this.zoom = Math.max(0.5, Math.min(10, nextZoom));
         this._camVelZoom = nextZoomVel;
+        this._rescalePanForZoom(prevZoom);
         this.onZoomChange?.(this.zoom);
       } else {
         if (this.zoom !== targetZoom) {
           this.zoom = targetZoom;
+          this._rescalePanForZoom(prevZoom);
           this.onZoomChange?.(this.zoom);
         }
         this._camVelZoom = 0;
@@ -1543,11 +1598,13 @@ export class SeismicMap {
           ? Math.min(0.1, Math.max(0.001, (now - this._lastAutoCamTime) / 1000))
           : 1 / 60;
         this._lastAutoCamTime = now;
+        const prevZoom = this.zoom || 1;
         const [nextZoom, nextZoomVel] = smoothDamp(
           this.zoom, 1, this._camVelZoom, 0.45, dt
         );
         this.zoom = Math.abs(nextZoom - 1) <= 0.003 ? 1 : Math.max(0.5, Math.min(10, nextZoom));
         this._camVelZoom = this.zoom === 1 ? 0 : nextZoomVel;
+        this._rescalePanForZoom(prevZoom);
         this.onZoomChange?.(this.zoom);
       } else {
         this._lastAutoCamTime = null;
@@ -1567,8 +1624,8 @@ export class SeismicMap {
       this.rotLat = this._transStartLat + this._transDeltaLat * eased;
       this._clampRotation();
     } else {
-      this.panX = this._transStartPanX + this._transDeltaPanX * eased;
-      this.panY = this._transStartPanY * (1 - eased);
+      this.panX = (this._transStartPanX + this._transDeltaPanX * eased) * this.zoom;
+      this.panY = (this._transStartPanY + this._transDeltaPanY * eased) * this.zoom;
       this._clampPan();
     }
     this.onZoomChange?.(this.zoom);
@@ -1819,10 +1876,17 @@ export class SeismicMap {
 
     this._updateCamera(m);
 
-    // Sun reticle on lowest ocean plane
-    morphPointCPU(sunLon, sunLat, R_OCEAN + 0.008, m, 0, this.rotLon, this.rotLat, pan2DX, pan2DY, this._sunSprite.position);
-    const spriteSize = ((m < 0.5 ? 0.36 : 0.28) / Math.sqrt(this.zoom)) * 0.25;
-    this._sunSprite.scale.set(spriteSize, spriteSize, 1);
+    // Position directional sun light beyond the camera, geosynced to true subsolar direction
+    const sunDist = Math.max(25, this.camera.position.length() * 3);
+    this._sunLight.position.copy(this._sharedUniforms.uSunDir.value).multiplyScalar(sunDist);
+    const sunScale = sunDist / 25;
+    const showSun3D = m > 0.02;
+    this._sunOrb.visible = showSun3D;
+    this._sunCorona.visible = showSun3D;
+    if (showSun3D) {
+      this._sunOrb.scale.setScalar(sunScale);
+      this._sunCorona.scale.set(3.8 * sunScale, 3.8 * sunScale, 1);
+    }
 
     this._updateQuakeDiscs(m);
     this._updateWaves(now, m);

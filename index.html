@@ -21,7 +21,7 @@
     <header class="top-bar">
       <div class="top-bar-left">
         <div class="brand glass">
-          <div>
+          <div class="brand-text">
             <h1>SEISMIC RESONANCE</h1>
             <p class="subtitle">Real-Time USGS Earthquake Sonification · Sub-Bass Engine</p>
           </div>
@@ -39,17 +39,16 @@
           </button>
           <button id="btn-readme" class="brand-help-btn" type="button" title="About &amp; README" aria-label="Open README and project info" aria-expanded="false" aria-controls="readme-modal-backdrop">?</button>
         </div>
+      </div>
 
-        <div class="map-mode-bar glass" id="map-mode-bar">
+      <div class="header-stats glass">
+        <div class="stat-pill map-mode-bar" id="map-mode-bar">
           <span class="stat-label">MAP</span>
           <div class="segmented map-mode-toggle" id="map-mode-toggle" role="group" aria-label="Map projection mode">
             <button type="button" data-map-mode="2d">2D</button>
             <button type="button" data-map-mode="3d" class="active">3D</button>
           </div>
         </div>
-      </div>
-
-      <div class="header-stats glass">
         <div class="stat-pill">
           <div class="brand-pulse" id="live-indicator"></div>
           <span class="stat-label">FEED</span>
