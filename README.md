@@ -2,6 +2,8 @@
 
 An interactive global earthquake map and real-time sub-bass sonification instrument built with the Web Audio API, HTML5 Canvas, and live USGS GeoJSON feeds—transforming tectonic activity into a spatial low-frequency soundscape with stereo spectrum analyzers, tectonic plate overlays, and time-lapse replay
 
+[Watch & Listen](https://www.brettmrice.com/Seismic-Resonance/)
+
 ## Inspiration & Credits
 
 - **Inspiration:** Inspired by Google DeepMind's [Introducing Gemini 4 Hydrogen](https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/) announcement and the real-time global phenomenon sonification example shown in [this YouTube video](https://youtu.be/wRdIl5dnqUY)
