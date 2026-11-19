@@ -97,3 +97,55 @@ export async function fetchEarthquakesByRange({ startDate, endDate, minMag, maxM
   const url = `https://earthquake.usgs.gov/fdsnws/event/1/query?${params.toString()}`;
   return fetchEarthquakesFromUrl(url);
 }
+
+/**
+ * Probes the local SQLite API served by local.py.
+ * Returns null if not running locally or if the endpoint is unavailable.
+ */
+export async function fetchLocalDbStatus() {
+  try {
+    const response = await fetch('/api/usgs/status', { cache: 'no-store' });
+    if (!response.ok) return null;
+    const ct = response.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Queries earthquakes from the local SQLite database via /api/usgs/events.
+ */
+export async function fetchLocalDbEvents({
+  startDate,
+  endDate,
+  minMag,
+  maxMag,
+  place,
+  limit = 5000,
+  order = 'asc',
+} = {}) {
+  const params = new URLSearchParams({
+    format: 'geojson',
+    order,
+    limit: String(limit),
+  });
+  if (startDate) params.set('start', localDateBoundaryToIso(startDate, false));
+  if (endDate) {
+    params.set('end', localDateBoundaryToIso(endDate, true));
+  } else if (startDate) {
+    params.set('end', localDateBoundaryToIso(startDate, true));
+  }
+  if (typeof minMag === 'number' && Number.isFinite(minMag) && minMag > 0) {
+    params.set('minmag', String(minMag));
+  }
+  if (typeof maxMag === 'number' && Number.isFinite(maxMag) && maxMag < 10) {
+    params.set('maxmag', String(maxMag));
+  }
+  if (place && place.trim()) {
+    params.set('place', place.trim());
+  }
+
+  return fetchEarthquakesFromUrl(`/api/usgs/events?${params.toString()}`);
+}

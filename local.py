@@ -19,12 +19,16 @@ from pathlib import Path
 import socket
 import socketserver
 import sys
+import tempfile
 import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
+
+import usgs_db
 
 # Project root directory (location of local.py)
 ROOT_DIR = Path(__file__).resolve().parent
@@ -63,9 +67,92 @@ class DevHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         **http.server.SimpleHTTPRequestHandler.extensions_map,
         **CUSTOM_MIMETYPES,
     }
+    db_path: Path = usgs_db.DEFAULT_DB_PATH
 
     def __init__(self, *args, directory=None, **kwargs):
         super().__init__(*args, directory=str(ROOT_DIR), **kwargs)
+
+    def _send_json(self, payload: dict | list, status_code: int = 200):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/api/usgs/"):
+            self._handle_usgs_api(parsed)
+            return
+        super().do_GET()
+
+    def _handle_usgs_api(self, parsed: urllib.parse.ParseResult):
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        def _arg(name: str, default: str | None = None) -> str | None:
+            vals = qs.get(name)
+            return vals[0] if vals and vals[0] != "" else default
+
+        def _float_arg(name: str) -> float | None:
+            v = _arg(name)
+            return float(v) if v is not None else None
+
+        def _int_arg(name: str, default: int) -> int:
+            v = _arg(name)
+            return int(v) if v is not None else default
+
+        try:
+            if parsed.path == "/api/usgs/status":
+                self._send_json(usgs_db.get_db_status(self.db_path))
+                return
+
+            if parsed.path == "/api/usgs/summary":
+                self._send_json(
+                    usgs_db.get_summary(
+                        self.db_path,
+                        start=_arg("start"),
+                        end=_arg("end"),
+                    )
+                )
+                return
+
+            if parsed.path == "/api/usgs/events":
+                bbox_val = _arg("bbox")
+                bbox_tuple = None
+                if bbox_val:
+                    parts = [float(x.strip()) for x in bbox_val.split(",")]
+                    if len(parts) != 4:
+                        self._send_json({"error": "bbox must be minlon,minlat,maxlon,maxlat"}, 400)
+                        return
+                    bbox_tuple = (parts[0], parts[1], parts[2], parts[3])
+
+                rows = usgs_db.query_events(
+                    self.db_path,
+                    start=_arg("start"),
+                    end=_arg("end"),
+                    min_mag=_float_arg("minmag"),
+                    max_mag=_float_arg("maxmag"),
+                    min_depth=_float_arg("mindepth"),
+                    max_depth=_float_arg("maxdepth"),
+                    bbox=bbox_tuple,
+                    place=_arg("place"),
+                    event_type=_arg("type"),
+                    limit=_int_arg("limit", 20000),
+                    order=_arg("order", "asc") or "asc",
+                )
+                fmt = (_arg("format", "geojson") or "geojson").lower()
+                if fmt == "json":
+                    self._send_json({"count": len(rows), "events": rows})
+                else:
+                    self._send_json(usgs_db.rows_to_geojson(rows))
+                return
+
+            self._send_json({"error": f"Unknown endpoint: {parsed.path}"}, 404)
+        except ValueError as exc:
+            self._send_json({"error": f"Invalid query parameter: {exc}"}, 400)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, 500)
 
     def end_headers(self):
         # Disable caching during development
@@ -271,6 +358,97 @@ class TestUSGSFeedConnectivity(unittest.TestCase):
             self.skipTest(f"USGS network endpoint unreachable (offline or restricted environment): {e}")
 
 
+class TestLocalUSGSDatabase(unittest.TestCase):
+    """Tests local SQLite USGS database operations and /api/usgs/* HTTP endpoints."""
+
+    def test_db_lifecycle_and_http_api(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_file = Path(tmpdir) / "test_usgs.db"
+            conn = usgs_db.init_db(db_file)
+            sample_features = [
+                {
+                    "type": "Feature",
+                    "id": "us_test_1",
+                    "properties": {
+                        "mag": 5.4,
+                        "place": "12 km SE of Tokyo, Japan",
+                        "time": 1700000000000,
+                        "updated": 1700000500000,
+                        "url": "https://earthquake.usgs.gov/earthquakes/eventpage/us_test_1",
+                        "tsunami": 0,
+                        "sig": 450,
+                        "magType": "mww",
+                        "type": "earthquake",
+                        "status": "reviewed",
+                        "title": "M 5.4 - 12 km SE of Tokyo, Japan",
+                    },
+                    "geometry": {"type": "Point", "coordinates": [139.8, 35.6, 42.5]},
+                },
+                {
+                    "type": "Feature",
+                    "id": "us_test_2",
+                    "properties": {
+                        "mag": 2.1,
+                        "place": "5 km NW of Ridgecrest, CA",
+                        "time": 1700003600000,
+                        "updated": 1700003900000,
+                        "url": "https://earthquake.usgs.gov/earthquakes/eventpage/us_test_2",
+                        "tsunami": 0,
+                        "sig": 68,
+                        "magType": "ml",
+                        "type": "earthquake",
+                        "status": "automatic",
+                        "title": "M 2.1 - 5 km NW of Ridgecrest, CA",
+                    },
+                    "geometry": {"type": "Point", "coordinates": [-117.7, 35.65, 8.2]},
+                },
+            ]
+            with conn:
+                inserted = usgs_db.upsert_features(conn, sample_features)
+            conn.close()
+            self.assertEqual(inserted, 2)
+
+            status = usgs_db.get_db_status(db_file)
+            self.assertTrue(status["available"])
+            self.assertEqual(status["total_events"], 2)
+
+            filtered = usgs_db.query_events(db_file, min_mag=4.0, place="Tokyo")
+            self.assertEqual(len(filtered), 1)
+            self.assertEqual(filtered[0]["id"], "us_test_1")
+
+            # Spin up a temporary HTTP handler pointed at db_file
+            class TestDBHandler(DevHTTPRequestHandler):
+                db_path = db_file
+
+            port = find_available_port("127.0.0.1", 9100)
+            srv = ThreadedTCPServer(("127.0.0.1", port), TestDBHandler)
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/usgs/status", timeout=5) as res:
+                    self.assertEqual(res.status, 200)
+                    st_json = json.loads(res.read().decode("utf-8"))
+                    self.assertEqual(st_json["total_events"], 2)
+
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/usgs/events?minmag=4.0&format=geojson",
+                    timeout=5,
+                ) as res:
+                    self.assertEqual(res.status, 200)
+                    gj = json.loads(res.read().decode("utf-8"))
+                    self.assertEqual(gj["type"], "FeatureCollection")
+                    self.assertEqual(len(gj["features"]), 1)
+                    self.assertEqual(gj["features"][0]["id"], "us_test_1")
+
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/usgs/summary", timeout=5) as res:
+                    self.assertEqual(res.status, 200)
+                    sm = json.loads(res.read().decode("utf-8"))
+                    self.assertEqual(sm["total"], 2)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+
 def run_tests() -> bool:
     """Runs test suite and returns True if all passed."""
     print("=" * 64)
@@ -281,6 +459,7 @@ def run_tests() -> bool:
     loader = unittest.TestLoader()
     suite.addTests(loader.loadTestsFromTestCase(TestWorkspaceIntegrity))
     suite.addTests(loader.loadTestsFromTestCase(TestHTTPServer))
+    suite.addTests(loader.loadTestsFromTestCase(TestLocalUSGSDatabase))
     suite.addTests(loader.loadTestsFromTestCase(TestUSGSFeedConnectivity))
 
     runner = unittest.TextTestRunner(verbosity=2)

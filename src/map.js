@@ -342,6 +342,7 @@ export class SeismicMap {
       uCamPos: { value: new THREE.Vector3(0, 0, 5) },
       uRot: { value: new THREE.Vector2(0, 0) },
       uPan2D: { value: new THREE.Vector2(0, 0) },
+      uResolution: { value: new THREE.Vector2(1, 1) },
     };
 
     // 3 horizontal tile groups (-1, 0, +1) for seamless 2D wrap-around
@@ -493,8 +494,13 @@ export class SeismicMap {
 
             col += vec3(0.14, 0.23, 0.36) * pow(dayFactor, 1.15) * 0.55;
 
-            // Solar specular glint on the ocean
-            vec3 halfVec = normalize(sunDirN + viewDir);
+            // Solar specular glint on the ocean:
+            // In 2D mode, center on the true subsolar point (sunDirN) rather than
+            // mixing globe-rotated sunDirN with 2D camera-space viewDir;
+            // in 3D mode, use standard Blinn-Phong reflection toward the camera.
+            vec3 sumVec = sunDirN + viewDir;
+            vec3 halfVec3D = length(sumVec) > 0.0001 ? normalize(sumVec) : n;
+            vec3 halfVec = normalize(mix(sunDirN, halfVec3D, uMorph));
             float specBroad = pow(max(dot(n, halfVec), 0.0), 28.0) * smoothstep(-0.05, 0.25, sunDot);
             float specTight = pow(max(dot(n, halfVec), 0.0), 160.0) * smoothstep(0.0, 0.2, sunDot);
             col += vec3(1.0, 0.88, 0.65) * (specBroad * 0.18 + specTight * 0.45);
@@ -627,73 +633,234 @@ export class SeismicMap {
 
   _buildPlateLayer() {
     if (!this.plateFeatures.length) return;
+
+    const splitAntimeridian = (coords) => {
+      const chains = [];
+      let cur = [];
+      for (let i = 0; i < coords.length; i++) {
+        const pt = coords[i];
+        if (cur.length > 0 && Math.abs(pt[0] - cur[cur.length - 1][0]) > 180) {
+          if (cur.length >= 2) chains.push(cur);
+          cur = [pt];
+        } else {
+          cur.push(pt);
+        }
+      }
+      if (cur.length >= 2) chains.push(cur);
+      return chains;
+    };
+
+    const rdpSimplify = (pts, epsilon) => {
+      if (pts.length <= 2) return pts;
+      const keep = new Uint8Array(pts.length);
+      keep[0] = 1;
+      keep[pts.length - 1] = 1;
+      const stack = [[0, pts.length - 1]];
+      while (stack.length) {
+        const [start, end] = stack.pop();
+        if (end - start <= 1) continue;
+        const [ax, ay] = pts[start];
+        const [bx, by] = pts[end];
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lenSq = dx * dx + dy * dy;
+        let maxDist = 0;
+        let maxIdx = -1;
+        for (let i = start + 1; i < end; i++) {
+          const [px, py] = pts[i];
+          let dist;
+          if (lenSq < 1e-12) {
+            dist = Math.hypot(px - ax, py - ay);
+          } else {
+            const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+            dist = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+          }
+          if (dist > maxDist) {
+            maxDist = dist;
+            maxIdx = i;
+          }
+        }
+        if (maxDist > epsilon && maxIdx !== -1) {
+          keep[maxIdx] = 1;
+          stack.push([start, maxIdx], [maxIdx, end]);
+        }
+      }
+      const out = [];
+      for (let i = 0; i < pts.length; i++) {
+        if (keep[i]) out.push(pts[i]);
+      }
+      return out;
+    };
+
+    const chaikinSmooth = (pts, iterations) => {
+      if (pts.length <= 2) return pts;
+      const first = pts[0];
+      const last = pts[pts.length - 1];
+      const isClosed = Math.hypot(last[0] - first[0], last[1] - first[1]) < 1e-4;
+      let cur = pts;
+      for (let it = 0; it < iterations; it++) {
+        const next = [];
+        if (isClosed) {
+          const n = cur.length - 1;
+          for (let i = 0; i < n; i++) {
+            const p0 = cur[i];
+            const p1 = cur[(i + 1) % n];
+            next.push([p0[0] * 0.75 + p1[0] * 0.25, p0[1] * 0.75 + p1[1] * 0.25]);
+            next.push([p0[0] * 0.25 + p1[0] * 0.75, p0[1] * 0.25 + p1[1] * 0.75]);
+          }
+          next.push([next[0][0], next[0][1]]);
+        } else {
+          // Pin endpoints so adjacent plate boundaries meet cleanly at junctions
+          next.push(cur[0]);
+          for (let i = 0; i < cur.length - 1; i++) {
+            const p0 = cur[i];
+            const p1 = cur[i + 1];
+            next.push([p0[0] * 0.75 + p1[0] * 0.25, p0[1] * 0.75 + p1[1] * 0.25]);
+            next.push([p0[0] * 0.25 + p1[0] * 0.75, p0[1] * 0.25 + p1[1] * 0.75]);
+          }
+          next.push(cur[cur.length - 1]);
+        }
+        cur = next;
+      }
+      return cur;
+    };
+
+    const subdivideChain = (pts, maxStepDeg) => {
+      const out = [pts[0]];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [lon0, lat0] = pts[i];
+        const [lon1, lat1] = pts[i + 1];
+        const steps = Math.max(1, Math.ceil(Math.hypot(lon1 - lon0, lat1 - lat0) / maxStepDeg));
+        for (let s = 1; s <= steps; s++) {
+          const t = s / steps;
+          out.push([lon0 + (lon1 - lon0) * t, lat0 + (lat1 - lat0) * t]);
+        }
+      }
+      return out;
+    };
+
     const geos = [];
+    const prevGeos = [];
+    const nextGeos = [];
+    const sides = [];
+    const indices = [];
+    const rPlate = R_OCEAN + 0.0022;
+    let vertOffset = 0;
 
     for (const feature of this.plateFeatures) {
       const geom = feature.geometry;
       if (!geom) continue;
       const lines = geom.type === 'LineString' ? [geom.coordinates] : geom.coordinates;
       for (const line of lines) {
-        for (let i = 0; i < line.length - 1; i++) {
-          const [lon0, lat0] = line[i];
-          const [lon1, lat1] = line[i + 1];
-          if (Math.abs(lon1 - lon0) > 180) continue;
-          // Subdivide long segments so plates hug the inner ocean sphere
-          const steps = Math.max(1, Math.ceil(Math.hypot(lon1 - lon0, lat1 - lat0) / 5));
-          for (let s = 0; s < steps; s++) {
-            const t0 = s / steps;
-            const t1 = (s + 1) / steps;
-            geos.push(
-              lon0 + (lon1 - lon0) * t0,
-              lat0 + (lat1 - lat0) * t0,
-              R_OCEAN + 0.0022,
-              lon0 + (lon1 - lon0) * t1,
-              lat0 + (lat1 - lat0) * t1,
-              R_OCEAN + 0.0022
-            );
+        const chains = splitAntimeridian(line);
+        for (const rawChain of chains) {
+          const simplified = rdpSimplify(rawChain, 1.2);
+          const smoothed = chaikinSmooth(simplified, 3);
+          const pts = subdivideChain(smoothed, 3.0);
+          if (pts.length < 2) continue;
+
+          for (let i = 0; i < pts.length; i++) {
+            const p = pts[i];
+            const pPrev = pts[Math.max(0, i - 1)];
+            const pNext = pts[Math.min(pts.length - 1, i + 1)];
+
+            for (const side of [-1, 1]) {
+              geos.push(p[0], p[1], rPlate);
+              prevGeos.push(pPrev[0], pPrev[1], rPlate);
+              nextGeos.push(pNext[0], pNext[1], rPlate);
+              sides.push(side);
+            }
+
+            if (i < pts.length - 1) {
+              const v0 = vertOffset + i * 2;
+              const v1 = v0 + 1;
+              const v2 = v0 + 2;
+              const v3 = v0 + 3;
+              indices.push(v0, v1, v2, v1, v3, v2);
+            }
           }
+          vertOffset += pts.length * 2;
         }
       }
     }
+
+    if (vertOffset === 0) return;
 
     const pos = new Float32Array((geos.length / 3) * 3);
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geom.setAttribute('aGeo', new THREE.Float32BufferAttribute(geos, 3));
+    geom.setAttribute('aPrevGeo', new THREE.Float32BufferAttribute(prevGeos, 3));
+    geom.setAttribute('aNextGeo', new THREE.Float32BufferAttribute(nextGeos, 3));
+    geom.setAttribute('aSide', new THREE.Float32BufferAttribute(sides, 1));
+    geom.setIndex(indices);
 
     this._plateMeshes = [];
     for (let t = 0; t < 3; t++) {
       const mat = new THREE.ShaderMaterial({
         transparent: true,
         depthWrite: false,
+        side: THREE.DoubleSide,
         uniforms: {
           uMorph: this._sharedUniforms.uMorph,
           uRot: this._sharedUniforms.uRot,
           uPan2D: this._sharedUniforms.uPan2D,
+          uResolution: this._sharedUniforms.uResolution,
+          uHalfWidthPx: { value: 1.75 },
           uTileOffsetX: this._tileUniforms[t].uTileOffsetX,
           uTileAlpha: this._tileUniforms[t].uTileAlpha,
         },
         vertexShader: /* glsl */ `
           attribute vec3 aGeo;
+          attribute vec3 aPrevGeo;
+          attribute vec3 aNextGeo;
+          attribute float aSide;
           uniform float uMorph;
           uniform float uTileOffsetX;
+          uniform float uHalfWidthPx;
           uniform vec2 uRot;
           uniform vec2 uPan2D;
+          uniform vec2 uResolution;
+          varying float vEdge;
           ${GLSL_MORPH_FN}
           void main() {
             vec3 p = geoToMorphPos(aGeo, uMorph, uTileOffsetX, uRot, uPan2D);
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+            vec3 pPrev = geoToMorphPos(aPrevGeo, uMorph, uTileOffsetX, uRot, uPan2D);
+            vec3 pNext = geoToMorphPos(aNextGeo, uMorph, uTileOffsetX, uRot, uPan2D);
+
+            vec4 clip = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+            vec4 clipPrev = projectionMatrix * modelViewMatrix * vec4(pPrev, 1.0);
+            vec4 clipNext = projectionMatrix * modelViewMatrix * vec4(pNext, 1.0);
+
+            vec2 ndc = clip.xy / max(abs(clip.w), 1e-4);
+            vec2 ndcPrev = clipPrev.xy / max(abs(clipPrev.w), 1e-4);
+            vec2 ndcNext = clipNext.xy / max(abs(clipNext.w), 1e-4);
+
+            vec2 dirPx = (ndcNext - ndcPrev) * uResolution * 0.5;
+            float dirLen = length(dirPx);
+            vec2 tangent = dirLen > 1e-4 ? dirPx / dirLen : vec2(1.0, 0.0);
+            vec2 normalPx = vec2(-tangent.y, tangent.x);
+
+            clip.xy += normalPx * aSide * uHalfWidthPx * (2.0 / uResolution) * clip.w;
+            vEdge = aSide;
+            gl_Position = clip;
           }
         `,
         fragmentShader: /* glsl */ `
           uniform float uTileAlpha;
+          varying float vEdge;
           void main() {
             if (uTileAlpha < 0.01) discard;
-            gl_FragColor = vec4(1.0, 0.42, 0.21, 0.34 * uTileAlpha);
+            float d = abs(vEdge);
+            float halo = smoothstep(1.0, 0.15, d);
+            float core = smoothstep(0.45, 0.0, d);
+            float alpha = (halo * 0.30 + core * 0.32) * uTileAlpha;
+            vec3 col = mix(vec3(1.0, 0.42, 0.21), vec3(1.0, 0.58, 0.34), core * 0.45);
+            gl_FragColor = vec4(col, alpha);
           }
         `,
       });
-      const mesh = new THREE.LineSegments(geom, mat);
+      const mesh = new THREE.Mesh(geom, mat);
       mesh.renderOrder = 3;
       mesh.frustumCulled = false;
       mesh.visible = this.showPlates;
@@ -895,6 +1062,94 @@ export class SeismicMap {
   _buildWavePool() {
     this._waveSegments = 64;
     this._wavePool = [];
+    this._ripplePool = [];
+  }
+
+  _getPooledRippleMesh(idx) {
+    while (this._ripplePool.length <= idx) {
+      const segs = this._waveSegments;
+      const vertCount = (segs + 1) * 2;
+      const pts = new Float32Array(vertCount * 3);
+      const uvs = new Float32Array(vertCount * 2);
+      const indices = [];
+
+      for (let s = 0; s <= segs; s++) {
+        const u = s / segs;
+        // Inner vertex (v = 0) and outer vertex (v = 1)
+        uvs[s * 4] = u;
+        uvs[s * 4 + 1] = 0;
+        uvs[s * 4 + 2] = u;
+        uvs[s * 4 + 3] = 1;
+
+        if (s < segs) {
+          const a = s * 2;
+          const b = a + 1;
+          const c = a + 2;
+          const d = a + 3;
+          indices.push(a, b, c, b, d, c);
+        }
+      }
+
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+      geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+      geom.setIndex(indices);
+
+      const mat = new THREE.ShaderMaterial({
+        uniforms: {
+          uColor: { value: new THREE.Color(0xff6b35) },
+          uAlpha: { value: 0 },
+          uPhase: { value: 0 },
+          uProgress: { value: 0 },
+        },
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+        side: THREE.DoubleSide,
+        blending: THREE.NormalBlending,
+        vertexShader: /* glsl */ `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform vec3 uColor;
+          uniform float uAlpha;
+          uniform float uPhase;
+          uniform float uProgress;
+          varying vec2 vUv;
+
+          void main() {
+            // Soft feathered inner & outer boundaries so no polygon edge is visible
+            float edgeFade = smoothstep(0.0, 0.24, vUv.y) * smoothstep(1.0, 0.86, vUv.y);
+
+            // Concentric water-like wave crests: primary leading crest + softer trailing ripple
+            float mainCrest = exp(-pow((vUv.y - 0.80) / 0.14, 2.0));
+            float subCrest = 0.45 * exp(-pow((vUv.y - 0.42) / 0.16, 2.0));
+            float shimmer = 0.86 + 0.14 * sin(vUv.x * 12.56637 + uPhase - uProgress * 4.0);
+
+            float body = (mainCrest + subCrest) * edgeFade;
+            float alpha = clamp(body * uAlpha * shimmer, 0.0, 0.36);
+            if (alpha < 0.003) discard;
+
+            // Subtle aquatic specular sheen on the leading wave crest
+            vec3 waterSheen = vec3(0.75, 0.92, 1.0);
+            vec3 col = mix(uColor, waterSheen, mainCrest * 0.38 * shimmer);
+            gl_FragColor = vec4(col, alpha);
+          }
+        `,
+      });
+
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.renderOrder = 11;
+      mesh.frustumCulled = false;
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this._ripplePool.push(mesh);
+    }
+    return this._ripplePool[idx];
   }
 
   _getPooledWaveLine(idx) {
@@ -1227,6 +1482,10 @@ export class SeismicMap {
 
     this.renderer.setPixelRatio(this.dpr);
     this.renderer.setSize(this.width, this.height, false);
+    this._sharedUniforms.uResolution.value.set(
+      Math.max(1, this.width),
+      Math.max(1, this.height)
+    );
     this.camera.aspect = Math.max(0.1, this.width / Math.max(1, this.height));
     this.camera.updateProjectionMatrix();
     this._clampPan();
@@ -1740,6 +1999,7 @@ export class SeismicMap {
   _updateWaves(now, m) {
     const alive = [];
     let poolIdx = 0;
+    let rippleIdx = 0;
     const tiles = m < 0.85 ? this._tileOffsets : [0];
     const [pan2DX, pan2DY] = this._getPan2D();
     const segs = this._waveSegments;
@@ -1803,9 +2063,14 @@ export class SeismicMap {
         const radialSpread = 0.35 + 0.65 * rt;
 
         for (let tileIdx = 0; tileIdx < tiles.length; tileIdx++) {
+          const tileOffset = tiles[tileIdx];
           const line = this._getPooledWaveLine(poolIdx++);
           const posAttr = line.geometry.getAttribute('position');
           const arr = posAttr.array;
+
+          const ripple = this._getPooledRippleMesh(rippleIdx++);
+          const ripPosAttr = ripple.geometry.getAttribute('position');
+          const ripArr = ripPosAttr.array;
 
           for (let s = 0; s <= segs; s++) {
             const theta = (s / segs) * Math.PI * 2;
@@ -1814,29 +2079,59 @@ export class SeismicMap {
               Math.sin(theta * 5 - phaseB - drift * 0.72) * 0.3 +
               Math.cos(theta * 2 + phaseC + drift * 0.41) * 0.18;
             const rad = Math.max(0.002, radiusWorld * (1 + harmonic * wobbleAmp * radialSpread));
+            const cosT = Math.cos(theta);
+            const sinT = Math.sin(theta);
 
             // Convert world radial offset to (lon, lat) offset
-            const dLon = Math.cos(theta) * rad * degScaleLon;
-            const dLat = Math.sin(theta) * rad * degScaleLat;
+            const dLon = cosT * rad * degScaleLon;
+            const dLat = sinT * rad * degScaleLat;
             const pLon = w.lon + dLon;
             const pLat = Math.max(-89.5, Math.min(89.5, w.lat + dLat));
 
-            morphPointCPU(pLon, pLat, rWave, m, tiles[tileIdx], this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec);
+            morphPointCPU(pLon, pLat, rWave, m, tileOffset, this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec);
             arr[s * 3] = this._tmpVec.x;
             arr[s * 3 + 1] = this._tmpVec.y;
             arr[s * 3 + 2] = this._tmpVec.z;
+
+            // Inner & outer edges of the translucent water-like ripple band
+            const radIn = Math.max(0.001, rad * 0.52);
+            const pLonIn = w.lon + cosT * radIn * degScaleLon;
+            const pLatIn = Math.max(-89.5, Math.min(89.5, w.lat + sinT * radIn * degScaleLat));
+            morphPointCPU(pLonIn, pLatIn, rWave, m, tileOffset, this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec);
+            const vIdx = s * 6;
+            ripArr[vIdx] = this._tmpVec.x;
+            ripArr[vIdx + 1] = this._tmpVec.y;
+            ripArr[vIdx + 2] = this._tmpVec.z;
+
+            const radOut = Math.max(0.0025, rad * 1.05);
+            const pLonOut = w.lon + cosT * radOut * degScaleLon;
+            const pLatOut = Math.max(-89.5, Math.min(89.5, w.lat + sinT * radOut * degScaleLat));
+            morphPointCPU(pLonOut, pLatOut, rWave, m, tileOffset, this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec);
+            ripArr[vIdx + 3] = this._tmpVec.x;
+            ripArr[vIdx + 4] = this._tmpVec.y;
+            ripArr[vIdx + 5] = this._tmpVec.z;
           }
 
           posAttr.needsUpdate = true;
           line.material.color.setRGB(cr, cg, cb);
           line.material.opacity = Math.min(1, alpha);
           line.visible = true;
+
+          ripPosAttr.needsUpdate = true;
+          ripple.material.uniforms.uColor.value.setRGB(cr, cg, cb);
+          ripple.material.uniforms.uAlpha.value = Math.min(1, alpha) * 0.55;
+          ripple.material.uniforms.uPhase.value = phaseA + i * 1.3;
+          ripple.material.uniforms.uProgress.value = rt;
+          ripple.visible = true;
         }
       }
     }
 
     for (let i = poolIdx; i < this._wavePool.length; i++) {
       this._wavePool[i].visible = false;
+    }
+    for (let i = rippleIdx; i < this._ripplePool.length; i++) {
+      this._ripplePool[i].visible = false;
     }
 
     this.activeWaves = alive;

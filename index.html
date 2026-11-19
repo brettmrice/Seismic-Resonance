@@ -25,20 +25,49 @@
             <h1>SEISMIC RESONANCE</h1>
             <p class="subtitle">Real-Time USGS Earthquake Sonification · Sub-Bass Engine</p>
           </div>
-          <button id="btn-stream-toggle" class="brand-stream-btn" type="button" title="Pause Live / Stream" aria-label="Pause Live / Stream" aria-pressed="false">
-            <svg class="btn-stream-icon btn-stream-icon-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <rect x="6" y="4" width="4" height="16" rx="1"></rect>
-              <rect x="14" y="4" width="4" height="16" rx="1"></rect>
-            </svg>
-            <svg class="btn-stream-icon btn-stream-icon-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <polygon points="7 4 20 12 7 20 7 4"></polygon>
-            </svg>
-          </button>
-          <button id="btn-recorder-open" class="brand-rec-btn" type="button" title="Offline Stream Recorder" aria-label="Open Stream Recorder" aria-controls="recorder-modal-backdrop">
-            <span>REC</span>
-          </button>
-          <button id="btn-readme" class="brand-help-btn" type="button" title="About &amp; README" aria-label="Open README and project info" aria-expanded="false" aria-controls="readme-modal-backdrop">?</button>
         </div>
+      </div>
+
+      <div class="top-bar-actions glass">
+        <button id="btn-stream-toggle" class="brand-stream-btn" type="button" title="Pause Live / Stream" aria-label="Pause Live / Stream" aria-pressed="false">
+          <svg class="btn-stream-icon btn-stream-icon-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <rect x="6" y="4" width="4" height="16" rx="1"></rect>
+            <rect x="14" y="4" width="4" height="16" rx="1"></rect>
+          </svg>
+          <svg class="btn-stream-icon btn-stream-icon-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <polygon points="7 4 20 12 7 20 7 4"></polygon>
+          </svg>
+        </button>
+        <button id="btn-recorder-open" class="brand-rec-btn" type="button" title="Offline Stream Recorder" aria-label="Open Stream Recorder" aria-controls="recorder-modal-backdrop">
+          <span>REC</span>
+        </button>
+        <button id="btn-readme" class="brand-help-btn" type="button" title="About &amp; README" aria-label="Open README and project info" aria-expanded="false" aria-controls="readme-modal-backdrop">?</button>
+        <button id="btn-cinema-toggle" class="brand-cinema-btn" type="button" title="Cinema Mode" aria-label="Enter Cinema Mode" aria-pressed="false">
+          <svg class="btn-cinema-icon btn-cinema-icon-cinema" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="5" width="20" height="14" rx="2"></rect>
+            <polygon points="10 9 16 12 10 15 10 9" fill="currentColor" stroke="none"></polygon>
+          </svg>
+          <svg class="btn-cinema-icon btn-cinema-icon-hud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+            <line x1="3" y1="8" x2="21" y2="8"></line>
+            <line x1="8" y1="8" x2="8" y2="21"></line>
+            <line x1="16" y1="8" x2="16" y2="21"></line>
+          </svg>
+        </button>
+        <button id="btn-fullscreen-toggle" class="brand-fullscreen-btn" type="button" title="Enter Fullscreen" aria-label="Enter Fullscreen" aria-pressed="false">
+          <svg class="btn-fullscreen-icon btn-fullscreen-icon-enter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 3 21 3 21 9"></polyline>
+            <polyline points="9 21 3 21 3 15"></polyline>
+            <line x1="21" y1="3" x2="14" y2="10"></line>
+            <line x1="3" y1="21" x2="10" y2="14"></line>
+          </svg>
+          <svg class="btn-fullscreen-icon btn-fullscreen-icon-exit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="4 14 10 14 10 20"></polyline>
+            <polyline points="20 10 14 10 14 4"></polyline>
+            <line x1="14" y1="10" x2="21" y2="3"></line>
+            <line x1="3" y1="21" x2="10" y2="14"></line>
+          </svg>
+        </button>
       </div>
 
       <div class="header-stats glass">
@@ -90,8 +119,35 @@
             <option value="all_day" selected>Past 24 Hours (All Quakes)</option>
             <option value="2.5_day">Past 24 Hours (M2.5+)</option>
             <option value="4.5_week">Past 7 Days (M4.5+)</option>
+            <option value="local_db" id="opt-local-db" disabled>Local SQLite DB (Not Synced)</option>
           </select>
         </label>
+
+        <div class="local-db-controls" id="local-db-controls" style="display: none;">
+          <div class="local-db-meta mono" id="local-db-meta">0 events</div>
+          <div class="local-db-dates">
+            <label class="field">
+              <span>Start Date</span>
+              <input type="date" id="local-db-start" />
+            </label>
+            <label class="field">
+              <span>End Date</span>
+              <input type="date" id="local-db-end" />
+            </label>
+          </div>
+          <label class="field">
+            <span>Region / Place Filter</span>
+            <input type="text" id="local-db-place" placeholder="e.g. Japan, Alaska, Ridgecrest" />
+          </label>
+          <div class="local-db-actions">
+            <select id="local-db-limit" title="Max events to load">
+              <option value="1000">1,000 max</option>
+              <option value="5000" selected>5,000 max</option>
+              <option value="20000">20,000 max</option>
+            </select>
+            <button type="button" class="btn-local-query" id="btn-local-db-query">Query DB</button>
+          </div>
+        </div>
 
         <div class="field">
           <span>Playback Mode</span>

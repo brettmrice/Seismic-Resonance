@@ -3,6 +3,8 @@ import {
   fetchEarthquakes,
   fetchEarthquakesByRange,
   fetchEarthquakesFromUrl,
+  fetchLocalDbEvents,
+  fetchLocalDbStatus,
   parseGeoJsonPayload,
 } from './usgs.js';
 import { SeismicMap } from './map.js';
@@ -12,6 +14,7 @@ const SPEED_OPTIONS = [60, 180, 360, 480, 900];
 const POLL_INTERVAL_MS = 30000;
 const ASIDE_IDLE_MS = 10000;
 const TOP_BAR_IDLE_MS = 10000;
+const CINEMA_GRACE_MS = 3000;
 const HUD_CARD_LINGER_MS = 1500;
 const HUD_CARD_FADE_MS = 650;
 const DATASET_WINDOW_LABELS = {
@@ -19,6 +22,7 @@ const DATASET_WINDOW_LABELS = {
   all_day: '24H (All)',
   '2.5_day': '24H (M2.5+)',
   '4.5_week': '7D (M4.5+)',
+  local_db: 'Local DB',
 };
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -109,6 +113,9 @@ class App {
     this.isStreamPaused = false;
     this.isReadmeOpen = false;
     this.isRecorderOpen = false;
+    this.isManualCinema = false;
+    this._cinemaGraceUntil = 0;
+    this._cinemaGraceTimer = null;
     this._urlCleanUI = false;
     this._prePauseFeedStatus = null;
     this.pauseStartedAt = 0;
@@ -160,6 +167,14 @@ class App {
     }
 
     this.selectFeed = document.getElementById('select-feed');
+    this.optLocalDb = document.getElementById('opt-local-db');
+    this.localDbControls = document.getElementById('local-db-controls');
+    this.localDbMeta = document.getElementById('local-db-meta');
+    this.localDbStart = document.getElementById('local-db-start');
+    this.localDbEnd = document.getElementById('local-db-end');
+    this.localDbPlace = document.getElementById('local-db-place');
+    this.localDbLimit = document.getElementById('local-db-limit');
+    this.btnLocalDbQuery = document.getElementById('btn-local-db-query');
     this.modeButtons = document.querySelectorAll('#mode-toggle button');
     this.speedField = document.getElementById('speed-field');
     this.rangeSpeed = document.getElementById('range-speed');
@@ -183,6 +198,9 @@ class App {
 
     this.btnStreamToggle = document.getElementById('btn-stream-toggle');
     this.btnReadme = document.getElementById('btn-readme');
+    this.btnCinemaToggle = document.getElementById('btn-cinema-toggle');
+    this.btnFullscreenToggle = document.getElementById('btn-fullscreen-toggle');
+    this._brandEl = this.btnCinemaToggle?.parentElement || null;
     this.readmeBackdrop = document.getElementById('readme-modal-backdrop');
     this.btnReadmeClose = document.getElementById('btn-readme-close');
   }
@@ -232,48 +250,104 @@ class App {
     });
   }
 
+  async _enableAudio({ auditionLatest = true } = {}) {
+    this._cancelAutoPlayUnlock?.();
+    await this.audio.init();
+    this.audio.setEnabled(true);
+    this._syncChannelLayoutUI();
+    document.body.classList.add('audio-active');
+    this.btnAudio.classList.add('active');
+    this.btnAudio.title = 'Mute Audio';
+    this.btnAudio.setAttribute('aria-label', 'Mute Audio');
+    this.liveIndicator.classList.add('live');
+
+    if (this.isPaused && this.audio.ctx && this.audio.ctx.state === 'running') {
+      this.wasAudioRunning = true;
+      try {
+        await this.audio.ctx.suspend();
+      } catch {
+        // Ignore suspend errors
+      }
+    } else if (auditionLatest && !this.isPaused && this.filteredQuakes.length > 0) {
+      // Immediately audition the most recent quake on activation
+      this.triggerEvent(this.filteredQuakes[this.filteredQuakes.length - 1]);
+    }
+  }
+
+  _disableAudio() {
+    this._cancelAutoPlayUnlock?.();
+    this.audio.setEnabled(false);
+    this.wasAudioRunning = false;
+    document.body.classList.remove('audio-active');
+    this.btnAudio.classList.remove('active');
+    this.btnAudio.title = 'Start Audio';
+    this.btnAudio.setAttribute('aria-label', 'Start Audio');
+    this.liveIndicator.classList.remove('live');
+  }
+
+  async _attemptAutoPlayAudio() {
+    if (this.audio.enabled) return;
+    try {
+      await this.audio.init();
+    } catch {
+      return;
+    }
+
+    if (this.audio.ctx?.state === 'running') {
+      await this._enableAudio({ auditionLatest: false });
+      return;
+    }
+
+    // Browser autoplay policy suspended AudioContext until a user gesture.
+    // Unlock and start audio automatically on the first interaction anywhere.
+    const unlock = async (e) => {
+      if (e.target instanceof Element && e.target.closest('#btn-audio-toggle')) {
+        this._cancelAutoPlayUnlock?.();
+        return;
+      }
+      this._cancelAutoPlayUnlock?.();
+      if (!this.audio.enabled) {
+        await this._enableAudio({ auditionLatest: false });
+      }
+    };
+
+    const opts = { capture: true, passive: true };
+    window.addEventListener('pointerdown', unlock, opts);
+    window.addEventListener('keydown', unlock, opts);
+    this._cancelAutoPlayUnlock = () => {
+      window.removeEventListener('pointerdown', unlock, opts);
+      window.removeEventListener('keydown', unlock, opts);
+      this._cancelAutoPlayUnlock = null;
+    };
+  }
+
   _bindControls() {
     this.btnAudio.addEventListener('click', async () => {
       if (!this.audio.ctx || !this.audio.enabled) {
-        await this.audio.init();
-        this.audio.setEnabled(true);
-        this._syncChannelLayoutUI();
-        document.body.classList.add('audio-active');
-        this.btnAudio.classList.add('active');
-        this.btnAudio.title = 'Mute Audio';
-        this.btnAudio.setAttribute('aria-label', 'Mute Audio');
-        this.liveIndicator.classList.add('live');
-
-        if (this.isPaused && this.audio.ctx && this.audio.ctx.state === 'running') {
-          this.wasAudioRunning = true;
-          try {
-            await this.audio.ctx.suspend();
-          } catch {
-            // Ignore suspend errors
-          }
-        } else if (!this.isPaused && this.filteredQuakes.length > 0) {
-          // Immediately audition the most recent quake on activation
-          this.triggerEvent(this.filteredQuakes[this.filteredQuakes.length - 1]);
-        }
+        await this._enableAudio({ auditionLatest: true });
       } else {
-        this.audio.setEnabled(false);
-        this.wasAudioRunning = false;
-        document.body.classList.remove('audio-active');
-        this.btnAudio.classList.remove('active');
-        this.btnAudio.title = 'Start Audio';
-        this.btnAudio.setAttribute('aria-label', 'Start Audio');
-        this.liveIndicator.classList.remove('live');
+        this._disableAudio();
       }
     });
 
     this.selectFeed.addEventListener('change', (e) => {
       this.feedKey = e.target.value;
+      if (this.localDbControls) {
+        this.localDbControls.style.display = this.feedKey === 'local_db' ? 'flex' : 'none';
+      }
       if (this.statDatasetValue) {
         this.statDatasetValue.textContent = DATASET_WINDOW_LABELS[this.feedKey] || '24H (All)';
       }
       this.seenIds.clear();
       this.loadFeed(true);
     });
+
+    if (this.btnLocalDbQuery) {
+      this.btnLocalDbQuery.addEventListener('click', () => {
+        this.seenIds.clear();
+        this.loadFeed(true);
+      });
+    }
 
     this.modeButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -401,6 +475,23 @@ class App {
       this.openReadmeModal();
     });
 
+    this.btnCinemaToggle?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.isManualCinema) {
+        this._exitManualCinemaMode();
+      } else {
+        this._enterManualCinemaMode();
+      }
+    });
+
+    this.btnFullscreenToggle?.addEventListener('click', () => {
+      this._toggleFullscreen();
+    });
+
+    document.addEventListener('fullscreenchange', () => {
+      this._syncFullscreenUI();
+    });
+
     this.btnReadmeClose?.addEventListener('click', () => {
       this.closeReadmeModal();
     });
@@ -438,6 +529,132 @@ class App {
   }
 
   /**
+   * Enables auto-zoom and centers the map on the active/selected quake for Cinema Mode.
+   */
+  _activateCinemaAutoZoom() {
+    this.map?.setAutoZoomEnabled(true);
+    if (this.map?.canAutoTransition()) {
+      if (this.mode === 'stream') {
+        this._updateStreamAutoCenter();
+      } else if (this.filteredQuakes.length > 0) {
+        const selected = this.map.selectedQuakeId
+          ? this.filteredQuakes.find((q) => q.id === this.map.selectedQuakeId)
+          : null;
+        const currentQuake = selected || this.filteredQuakes[this.filteredQuakes.length - 1];
+        this._updateAutoCenterForQuake(currentQuake, 900);
+      }
+    }
+  }
+
+  /**
+   * Enters Cinema Mode immediately via the Cinema button, floating the button
+   * to the top-left of the window as a HUD return button with a 3s grace period.
+   */
+  _enterManualCinemaMode() {
+    if (this.isPaused || this.cleanUI || this.isRecorderOpen || this.isManualCinema) return;
+
+    if (this._idleTimer !== null) {
+      clearTimeout(this._idleTimer);
+      this._idleTimer = null;
+    }
+    if (this._topBarIdleTimer !== null) {
+      clearTimeout(this._topBarIdleTimer);
+      this._topBarIdleTimer = null;
+    }
+
+    this.isManualCinema = true;
+    this._cinemaGraceUntil = performance.now() + CINEMA_GRACE_MS;
+    if (this._cinemaGraceTimer !== null) {
+      clearTimeout(this._cinemaGraceTimer);
+    }
+    this._cinemaGraceTimer = setTimeout(() => {
+      this._cinemaGraceTimer = null;
+      if (this.isManualCinema) {
+        this.btnCinemaToggle?.classList.add('is-hidden');
+      }
+    }, CINEMA_GRACE_MS);
+
+    const btn = this.btnCinemaToggle;
+    if (btn) {
+      const rect = btn.getBoundingClientRect();
+      btn.style.left = `${rect.left}px`;
+      btn.style.top = `${rect.top}px`;
+      btn.classList.remove('is-hidden');
+      btn.classList.add('is-floating', 'is-hud-mode');
+      btn.setAttribute('aria-pressed', 'true');
+      btn.title = 'Return to HUD Mode';
+      btn.setAttribute('aria-label', 'Return to HUD Mode');
+      document.body.appendChild(btn);
+      // Force layout before transitioning to horizontal window center
+      btn.getBoundingClientRect();
+      btn.style.left = `calc(50% - ${rect.width / 2}px)`;
+      btn.style.top = '14px';
+    }
+
+    document.body.classList.add('asides-hidden', 'top-bar-hidden');
+    if (this.map?._manualNavHold || Math.abs((this.map?.zoom ?? 1) - 1) > 0.01) {
+      this._resetViewToCurrentPosition();
+    }
+    this._activateCinemaAutoZoom();
+  }
+
+  /**
+   * Exits manual Cinema Mode, restoring the button back into the brand bar
+   * and returning to HUD mode.
+   */
+  _exitManualCinemaMode() {
+    if (!this.isManualCinema) return;
+    this.isManualCinema = false;
+    this._cinemaGraceUntil = 0;
+    if (this._cinemaGraceTimer !== null) {
+      clearTimeout(this._cinemaGraceTimer);
+      this._cinemaGraceTimer = null;
+    }
+
+    const btn = this.btnCinemaToggle;
+    if (btn) {
+      btn.classList.remove('is-floating', 'is-hud-mode', 'is-hidden');
+      btn.style.left = '';
+      btn.style.top = '';
+      btn.setAttribute('aria-pressed', 'false');
+      btn.title = 'Cinema Mode';
+      btn.setAttribute('aria-label', 'Enter Cinema Mode');
+      if (this._brandEl) {
+        if (this.btnFullscreenToggle && this.btnFullscreenToggle.parentElement === this._brandEl) {
+          this._brandEl.insertBefore(btn, this.btnFullscreenToggle);
+        } else {
+          this._brandEl.appendChild(btn);
+        }
+      }
+    }
+
+    this._resetIdleTimer?.();
+  }
+
+  async _toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch {
+      // Ignore fullscreen rejection if blocked by browser or iframe policy
+    }
+  }
+
+  _syncFullscreenUI() {
+    const isFs = Boolean(document.fullscreenElement);
+    if (this.btnFullscreenToggle) {
+      this.btnFullscreenToggle.classList.toggle('is-fullscreen', isFs);
+      this.btnFullscreenToggle.setAttribute('aria-pressed', String(isFs));
+      const label = isFs ? 'Exit Fullscreen' : 'Enter Fullscreen';
+      this.btnFullscreenToggle.title = label;
+      this.btnFullscreenToggle.setAttribute('aria-label', label);
+    }
+  }
+
+  /**
    * Slides the left and right aside panels out after ASIDE_IDLE_MS of no page/mouse
    * interaction, then slides the top bar up and out after an additional
    * TOP_BAR_IDLE_MS of inactivity, restoring both on the next interaction.
@@ -445,8 +662,18 @@ class App {
   _initIdleAsides() {
     this._idleTimer = null;
     this._topBarIdleTimer = null;
-    const resetIdleTimer = () => {
+    const resetIdleTimer = (event) => {
       if (this.cleanUI) return;
+      if (this.isManualCinema) {
+        if (event?.target && this.btnCinemaToggle?.contains(event.target)) {
+          return;
+        }
+        if (performance.now() < this._cinemaGraceUntil) {
+          return;
+        }
+        this._exitManualCinemaMode();
+        return;
+      }
       document.body.classList.remove('asides-hidden', 'top-bar-hidden');
       this.map?.setAutoZoomEnabled(false);
       if (this._idleTimer !== null) {
@@ -465,18 +692,7 @@ class App {
           this._topBarIdleTimer = setTimeout(() => {
             if (!this.isPaused && !this.cleanUI && !this.isRecorderOpen) {
               document.body.classList.add('top-bar-hidden');
-              this.map?.setAutoZoomEnabled(true);
-              if (this.map?.canAutoTransition()) {
-                if (this.mode === 'stream') {
-                  this._updateStreamAutoCenter();
-                } else if (this.filteredQuakes.length > 0) {
-                  const selected = this.map.selectedQuakeId
-                    ? this.filteredQuakes.find((q) => q.id === this.map.selectedQuakeId)
-                    : null;
-                  const currentQuake = selected || this.filteredQuakes[this.filteredQuakes.length - 1];
-                  this._updateAutoCenterForQuake(currentQuake, 900);
-                }
-              }
+              this._activateCinemaAutoZoom();
             }
           }, TOP_BAR_IDLE_MS);
         }
@@ -505,6 +721,9 @@ class App {
   async _enterPausedState() {
     if (this.isPaused) return;
     this.isPaused = true;
+    if (this.btnCinemaToggle) {
+      this.btnCinemaToggle.disabled = true;
+    }
     this.pauseStartedAt = performance.now();
 
     if (this._rafId !== null) {
@@ -527,6 +746,9 @@ class App {
   async _exitPausedState() {
     if (!this.isPaused) return;
     this.isPaused = false;
+    if (this.btnCinemaToggle) {
+      this.btnCinemaToggle.disabled = false;
+    }
 
     const pauseDelta = performance.now() - this.pauseStartedAt;
     this.lastFrameTime = performance.now();
@@ -613,11 +835,40 @@ class App {
     this.btnReadme?.focus();
   }
 
+  async _probeLocalDb() {
+    const status = await fetchLocalDbStatus();
+    if (!status || !status.available || !status.total_events) return;
+    if (this.optLocalDb) {
+      this.optLocalDb.disabled = false;
+      this.optLocalDb.textContent = `Local SQLite DB (${status.total_events.toLocaleString()} events)`;
+    }
+    if (this.localDbMeta && status.min_time_iso && status.max_time_iso) {
+      const minD = status.min_time_iso.slice(0, 10);
+      const maxD = status.max_time_iso.slice(0, 10);
+      this.localDbMeta.textContent = `${status.total_events.toLocaleString()} events (${minD} → ${maxD})`;
+      if (this.localDbEnd && !this.localDbEnd.value) this.localDbEnd.value = maxD;
+      if (this.localDbStart && !this.localDbStart.value) {
+        // Default to last 7 days in DB for fast initial visualization
+        const endMs = status.max_time_ms || Date.now();
+        const weekAgo = new Date(endMs - 7 * 86400 * 1000).toISOString().slice(0, 10);
+        this.localDbStart.value = weekAgo < minD ? minD : weekAgo;
+      }
+    }
+  }
+
   async _start() {
+    this._probeLocalDb();
     await this.map.loadGeoData();
     await this.loadFeed(true);
+    this._attemptAutoPlayAudio();
     setInterval(() => {
-      if (!this.isPaused && !this.dateRange && !this.localGeoJsonUrl && !this.recorder.isRecording) {
+      if (
+        !this.isPaused &&
+        !this.dateRange &&
+        !this.localGeoJsonUrl &&
+        this.feedKey !== 'local_db' &&
+        !this.recorder.isRecording
+      ) {
         this.loadFeed(false);
       }
     }, POLL_INTERVAL_MS);
@@ -630,6 +881,16 @@ class App {
       let result;
       if (this.localGeoJsonUrl) {
         result = await fetchEarthquakesFromUrl(this.localGeoJsonUrl);
+      } else if (this.feedKey === 'local_db') {
+        result = await fetchLocalDbEvents({
+          startDate: this.localDbStart?.value || undefined,
+          endDate: this.localDbEnd?.value || undefined,
+          minMag: this.minMag,
+          maxMag: this.maxMag,
+          place: this.localDbPlace?.value || undefined,
+          limit: Number(this.localDbLimit?.value || 5000),
+          order: 'asc',
+        });
       } else if (this.dateRange?.startDate) {
         result = await fetchEarthquakesByRange({
           startDate: this.dateRange.startDate,
@@ -669,9 +930,11 @@ class App {
       }
       this.statFeedStatus.textContent = this.localGeoJsonUrl
         ? 'Offline GeoJSON'
-        : this.dateRange?.startDate
-          ? 'USGS Archive'
-          : 'USGS Live';
+        : this.feedKey === 'local_db'
+          ? 'Local SQLite'
+          : this.dateRange?.startDate
+            ? 'USGS Archive'
+            : 'USGS Live';
 
       // Trigger real-time incoming earthquakes
       if (!isInitial && newlyArrived.length > 0) {
