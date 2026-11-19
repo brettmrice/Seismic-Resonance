@@ -1422,6 +1422,7 @@ export class SeismicMap {
 
   _buildWavePool() {
     this._waveSegments = 64;
+    this._rippleRadialSegments = 12;
     this._wavePool = [];
     this._ripplePool = [];
   }
@@ -1429,30 +1430,34 @@ export class SeismicMap {
   _getPooledRippleMesh(idx) {
     while (this._ripplePool.length <= idx) {
       const segs = this._waveSegments;
-      const vertCount = (segs + 1) * 2;
+      const radialSegs = this._rippleRadialSegments;
+      const ringStride = radialSegs + 1;
+      const vertCount = (segs + 1) * ringStride;
       const pts = new Float32Array(vertCount * 3);
       const uvs = new Float32Array(vertCount * 2);
       const indices = [];
 
       for (let s = 0; s <= segs; s++) {
         const u = s / segs;
-        // Inner vertex (v = 0) and outer vertex (v = 1)
-        uvs[s * 4] = u;
-        uvs[s * 4 + 1] = 0;
-        uvs[s * 4 + 2] = u;
-        uvs[s * 4 + 3] = 1;
+        for (let r = 0; r <= radialSegs; r++) {
+          const v = r / radialSegs;
+          const vIdx = s * ringStride + r;
+          uvs[vIdx * 2] = u;
+          uvs[vIdx * 2 + 1] = v;
 
-        if (s < segs) {
-          const a = s * 2;
-          const b = a + 1;
-          const c = a + 2;
-          const d = a + 3;
-          indices.push(a, b, c, b, d, c);
+          if (s < segs && r < radialSegs) {
+            const a = s * ringStride + r;
+            const b = a + 1;
+            const c = a + ringStride;
+            const d = c + 1;
+            indices.push(a, b, c, b, d, c);
+          }
         }
       }
 
       const geom = new THREE.BufferGeometry();
       geom.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+      geom.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(vertCount * 3), 3));
       geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
       geom.setIndex(indices);
 
@@ -1470,9 +1475,16 @@ export class SeismicMap {
         blending: THREE.NormalBlending,
         vertexShader: /* glsl */ `
           varying vec2 vUv;
+          varying vec3 vViewNormal;
+          varying vec3 vViewDir;
           void main() {
             vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+            float nLen = length(normal);
+            vec3 safeN = nLen > 1e-5 ? normal / nLen : vec3(0.0, 0.0, 1.0);
+            vViewNormal = normalize(normalMatrix * safeN);
+            vViewDir = normalize(-mvPos.xyz);
+            gl_Position = projectionMatrix * mvPos;
           }
         `,
         fragmentShader: /* glsl */ `
@@ -1481,23 +1493,30 @@ export class SeismicMap {
           uniform float uPhase;
           uniform float uProgress;
           varying vec2 vUv;
+          varying vec3 vViewNormal;
+          varying vec3 vViewDir;
 
           void main() {
-            // Soft feathered inner & outer boundaries so no polygon edge is visible
-            float edgeFade = smoothstep(0.0, 0.24, vUv.y) * smoothstep(1.0, 0.86, vUv.y);
+            // Feather outer boundary where the soap bubble meets the event depth disc
+            float outerFade = smoothstep(1.0, 0.90, vUv.y);
 
-            // Concentric water-like wave crests: primary leading crest + softer trailing ripple
-            float mainCrest = exp(-pow((vUv.y - 0.80) / 0.14, 2.0));
-            float subCrest = 0.45 * exp(-pow((vUv.y - 0.42) / 0.16, 2.0));
-            float shimmer = 0.86 + 0.14 * sin(vUv.x * 12.56637 + uPhase - uProgress * 4.0);
+            // Soap-bubble Fresnel rim: transparent center, luminous grazing walls
+            float ndotv = abs(dot(normalize(vViewNormal), normalize(vViewDir)));
+            float fresnel = pow(1.0 - ndotv, 2.2);
 
-            float body = (mainCrest + subCrest) * edgeFade;
-            float alpha = clamp(body * uAlpha * shimmer, 0.0, 0.36);
+            // Subtle thin-film iridescence + concentric rim band
+            float filmPhase = (1.0 - ndotv) * 7.5 + vUv.y * 3.0 + vUv.x * 12.56637 + uPhase - uProgress * 3.5;
+            vec3 irid = 0.5 + 0.5 * cos(filmPhase + vec3(0.0, 2.094, 4.188));
+            float rimBand = smoothstep(0.55, 0.93, vUv.y) * smoothstep(1.0, 0.94, vUv.y);
+            float shimmer = 0.88 + 0.12 * sin(vUv.x * 12.56637 + uPhase - uProgress * 4.0);
+
+            float body = (0.08 + 0.68 * fresnel + 0.34 * rimBand) * outerFade;
+            float alpha = clamp(body * uAlpha * shimmer, 0.0, 0.44);
             if (alpha < 0.003) discard;
 
-            // Subtle aquatic specular sheen on the leading wave crest
-            vec3 waterSheen = vec3(0.75, 0.92, 1.0);
-            vec3 col = mix(uColor, waterSheen, mainCrest * 0.38 * shimmer);
+            vec3 bubbleTint = mix(uColor, irid, 0.42 * fresnel + 0.12);
+            vec3 spec = vec3(0.85, 0.96, 1.0) * (pow(fresnel, 3.5) * 0.55);
+            vec3 col = bubbleTint + spec;
             gl_FragColor = vec4(col, alpha);
           }
         `,
@@ -2430,10 +2449,12 @@ export class SeismicMap {
         const alpha = (0.72 - i * 0.14) * ringFade;
         if (alpha <= 0.01) continue;
 
-        // Expand outward AND rise upward from event depth disc toward R_LAND surface
+        // Expand outward along event depth rStart and bulge upward toward R_LAND as a soap-bubble cap
         const radialEase = 1 - Math.pow(1 - rt, 2.2);
         const radiusWorld = baseMaxWorldR * radialEase;
-        const rWave = rStart + (R_LAND - rStart) * Math.pow(rt, 0.72);
+        const hMax = Math.max(0.002, R_LAND - rStart);
+        const hTarget = hMax * Math.pow(rt, 0.72);
+        const hCap = Math.min(hTarget, radiusWorld * 0.85);
 
         const phaseA = w.phaseA ?? 0;
         const phaseB = w.phaseB ?? 1.1;
@@ -2442,6 +2463,9 @@ export class SeismicMap {
         const freqScale = Math.max(0.65, Math.min(2.2, (w.freq || 36.7) / 36.7));
         const drift = rt * (2.0 + freqScale * 1.0) + i * 0.95;
         const radialSpread = 0.35 + 0.65 * rt;
+
+        const radialSegs = this._rippleRadialSegments;
+        const ringStride = radialSegs + 1;
 
         for (let tileIdx = 0; tileIdx < tiles.length; tileIdx++) {
           const tileOffset = tiles[tileIdx];
@@ -2463,34 +2487,41 @@ export class SeismicMap {
             const cosT = Math.cos(theta);
             const sinT = Math.sin(theta);
 
-            // Convert world radial offset to (lon, lat) offset
-            const dLon = cosT * rad * degScaleLon;
-            const dLat = sinT * rad * degScaleLat;
-            const pLon = w.lon + dLon;
-            const pLat = Math.max(-89.5, Math.min(89.5, w.lat + dLat));
+            // Convert world radial offset to (lon, lat) offset at base intersection (r = rStart)
+            const dLonBase = cosT * rad * degScaleLon;
+            const dLatBase = sinT * rad * degScaleLat;
+            const pLonBase = w.lon + dLonBase;
+            const pLatBase = Math.max(-89.5, Math.min(89.5, w.lat + dLatBase));
 
-            morphPointCPU(pLon, pLat, rWave, m, tileOffset, this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec);
+            morphPointCPU(pLonBase, pLatBase, rStart, m, tileOffset, this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec);
             arr[s * 3] = this._tmpVec.x;
             arr[s * 3 + 1] = this._tmpVec.y;
             arr[s * 3 + 2] = this._tmpVec.z;
 
-            // Inner & outer edges of the translucent water-like ripple band
-            const radIn = Math.max(0.001, rad * 0.52);
-            const pLonIn = w.lon + cosT * radIn * degScaleLon;
-            const pLatIn = Math.max(-89.5, Math.min(89.5, w.lat + sinT * radIn * degScaleLat));
-            morphPointCPU(pLonIn, pLatIn, rWave, m, tileOffset, this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec);
-            const vIdx = s * 6;
-            ripArr[vIdx] = this._tmpVec.x;
-            ripArr[vIdx + 1] = this._tmpVec.y;
-            ripArr[vIdx + 2] = this._tmpVec.z;
+            // Top spherical cap of sphere with radius Rs intersected by event depth rStart:
+            // Rs = (a^2 + h^2) / (2h), d = Rs - h, dr(v) = sqrt(Rs^2 - (v*a)^2) - d
+            const hasCap = hCap > 1e-6;
+            const rSphere = hasCap ? (rad * rad + hCap * hCap) / (2 * hCap) : 0;
+            const dCenter = rSphere - hCap;
 
-            const radOut = Math.max(0.0025, rad * 1.05);
-            const pLonOut = w.lon + cosT * radOut * degScaleLon;
-            const pLatOut = Math.max(-89.5, Math.min(89.5, w.lat + sinT * radOut * degScaleLat));
-            morphPointCPU(pLonOut, pLatOut, rWave, m, tileOffset, this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec);
-            ripArr[vIdx + 3] = this._tmpVec.x;
-            ripArr[vIdx + 4] = this._tmpVec.y;
-            ripArr[vIdx + 5] = this._tmpVec.z;
+            for (let r = 0; r <= radialSegs; r++) {
+              const v = r / radialSegs;
+              const rho = rad * v;
+              const deltaR = hasCap
+                ? Math.max(0, Math.sqrt(Math.max(0, rSphere * rSphere - rho * rho)) - dCenter)
+                : 0;
+              const pLon = w.lon + cosT * rho * degScaleLon;
+              const pLat = Math.max(-89.5, Math.min(89.5, w.lat + sinT * rho * degScaleLat));
+
+              morphPointCPU(
+                pLon, pLat, rStart + deltaR, m, tileOffset,
+                this.rotLon, this.rotLat, pan2DX, pan2DY, this._tmpVec
+              );
+              const vIdx = (s * ringStride + r) * 3;
+              ripArr[vIdx] = this._tmpVec.x;
+              ripArr[vIdx + 1] = this._tmpVec.y;
+              ripArr[vIdx + 2] = this._tmpVec.z;
+            }
           }
 
           posAttr.needsUpdate = true;
@@ -2499,6 +2530,7 @@ export class SeismicMap {
           line.visible = true;
 
           ripPosAttr.needsUpdate = true;
+          ripple.geometry.computeVertexNormals();
           ripple.material.uniforms.uColor.value.setRGB(cr, cg, cb);
           ripple.material.uniforms.uAlpha.value = Math.min(1, alpha) * 0.55;
           ripple.material.uniforms.uPhase.value = phaseA + i * 1.3;
