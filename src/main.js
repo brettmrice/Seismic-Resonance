@@ -192,6 +192,8 @@ class App {
     this.selectChannels = document.getElementById('select-channels');
     this.channelLayoutNote = document.getElementById('channel-layout-note');
     this.togglePlates = document.getElementById('toggle-plates');
+    this.toggleStars = document.getElementById('toggle-stars');
+    this.toggleMilkyWay = document.getElementById('toggle-milky-way');
     this.btnTriggerLatest = document.getElementById('btn-trigger-latest');
     this.btnResetZoom = document.getElementById('btn-reset-zoom');
     this.mapModeToggle = document.getElementById('map-mode-toggle');
@@ -449,6 +451,14 @@ class App {
 
     this.togglePlates.addEventListener('change', (e) => {
       this.map.setShowPlates(e.target.checked);
+    });
+
+    this.toggleStars?.addEventListener('change', (e) => {
+      this.map.setShowStars(e.target.checked);
+    });
+
+    this.toggleMilkyWay?.addEventListener('change', (e) => {
+      this.map.setShowMilkyWay(e.target.checked);
     });
 
     this.btnTriggerLatest.addEventListener('click', async () => {

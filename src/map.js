@@ -74,6 +74,17 @@ export function getSubsolarPoint(date = new Date()) {
   return { lon, lat };
 }
 
+/**
+ * Computes Greenwich Mean Sidereal Time (GMST) in degrees [0, 360) from UTC time.
+ * Matches the J2000 epoch convention used by getSubsolarPoint().
+ */
+export function getGMSTDeg(date = new Date()) {
+  const j2000Ms = Date.UTC(2000, 0, 1, 12, 0, 0);
+  const d = (date.getTime() - j2000Ms) / 86400000;
+  const gmst = 280.46061837 + 360.98564736629 * d;
+  return ((gmst % 360) + 360) % 360;
+}
+
 function normalizeLon(lon) {
   return ((((lon + 180) % 360) + 360) % 360) - 180;
 }
@@ -230,6 +241,8 @@ export class SeismicMap {
     this.landFeatures = [];
     this.plateFeatures = [];
     this.showPlates = true;
+    this.showStars = true;
+    this.showMilkyWay = true;
 
     this.quakes = [];
     this.activeWaves = [];
@@ -343,6 +356,8 @@ export class SeismicMap {
       uRot: { value: new THREE.Vector2(0, 0) },
       uPan2D: { value: new THREE.Vector2(0, 0) },
       uResolution: { value: new THREE.Vector2(1, 1) },
+      uGmstRotLon: { value: 0 },
+      uDpr: { value: 1 },
     };
 
     // 3 horizontal tile groups (-1, 0, +1) for seamless 2D wrap-around
@@ -360,12 +375,265 @@ export class SeismicMap {
       });
     }
 
+    this._buildMilkyWayLayer();
     this._buildAtmosphereGlow();
     this._buildOceanLayer();
     this._buildGraticuleLayer();
     this._buildSunLight();
     this._buildQuakeDiscLayer();
     this._buildWavePool();
+  }
+
+  _buildMilkyWayLayer() {
+    const geom = new THREE.SphereGeometry(115, 48, 32);
+    this._milkyWayMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      uniforms: {
+        uMorph: this._sharedUniforms.uMorph,
+        uRot: this._sharedUniforms.uRot,
+        uGmstRotLon: this._sharedUniforms.uGmstRotLon,
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vDirView;
+        void main() {
+          vDirView = normalize(position);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uMorph;
+        uniform vec2 uRot;
+        uniform float uGmstRotLon;
+        varying vec3 vDirView;
+        ${GLSL_DITHER_FN}
+
+        const float DEG2RAD = 0.017453292519943295;
+
+        float hash31(vec3 p) {
+          p = fract(p * 0.1031);
+          p += dot(p, p.yzx + 33.33);
+          return fract((p.x + p.y) * p.z);
+        }
+
+        float noise3(vec3 x) {
+          vec3 i = floor(x);
+          vec3 f = fract(x);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(
+              mix(hash31(i + vec3(0.0, 0.0, 0.0)), hash31(i + vec3(1.0, 0.0, 0.0)), f.x),
+              mix(hash31(i + vec3(0.0, 1.0, 0.0)), hash31(i + vec3(1.0, 1.0, 0.0)), f.x),
+              f.y
+            ),
+            mix(
+              mix(hash31(i + vec3(0.0, 0.0, 1.0)), hash31(i + vec3(1.0, 0.0, 1.0)), f.x),
+              mix(hash31(i + vec3(0.0, 1.0, 1.0)), hash31(i + vec3(1.0, 1.0, 1.0)), f.x),
+              f.y
+            ),
+            f.z
+          );
+        }
+
+        float fbm3(vec3 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 4; i++) {
+            v += a * noise3(p);
+            p = p * 2.07 + vec3(13.1, 7.7, 5.3);
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        void main() {
+          float vis = smoothstep(0.02, 0.35, uMorph);
+          if (vis < 0.002) discard;
+
+          vec3 dView = normalize(vDirView);
+
+          // Inverse pitch by -rotLat around X
+          float phi0 = uRot.y * DEG2RAD;
+          float cosP0 = cos(phi0);
+          float sinP0 = sin(phi0);
+          vec3 dLocal = vec3(
+            dView.x,
+            dView.y * cosP0 + dView.z * sinP0,
+           -dView.y * sinP0 + dView.z * cosP0
+          );
+
+          // Geographic view -> J2000 Equatorial Cartesian
+          float gRad = uGmstRotLon * DEG2RAD;
+          float cosG = cos(gRad);
+          float sinG = sin(gRad);
+          vec3 eq = vec3(
+            dLocal.z * cosG - dLocal.x * sinG,
+            dLocal.x * cosG + dLocal.z * sinG,
+            dLocal.y
+          );
+
+          // Standard IAU J2000 Equatorial -> Galactic Cartesian
+          vec3 gal = vec3(
+            dot(eq, vec3(-0.0548755604, -0.8734370902, -0.4838350155)),
+            dot(eq, vec3( 0.4941094279, -0.4448296300,  0.7469822445)),
+            dot(eq, vec3(-0.8676661490, -0.1980763734,  0.4559837762))
+          );
+
+          float b = asin(clamp(gal.z, -1.0, 1.0));
+          float absB = abs(b);
+          float lonCos = clamp(gal.x / max(0.001, length(gal.xy)), -1.0, 1.0);
+
+          // Galactic plane band + core bulge toward Sagittarius (gal.x > 0)
+          float band = exp(-absB / 0.175);
+          float halo = exp(-(b * b) / 0.095);
+          float bulge = pow(max(0.0, lonCos), 2.2) * exp(-(b * b) / 0.055);
+
+          float clouds = fbm3(gal * 5.2);
+          float fine = fbm3(gal * 14.0 + vec3(2.4));
+
+          // Great Rift dark dust lane along the galactic equator
+          float riftMask = exp(-(b * b) / 0.0055) * smoothstep(-0.2, 0.85, lonCos * 0.7 + gal.y * 0.4);
+          float dust = smoothstep(0.36, 0.68, clouds * 0.7 + fine * 0.3) * riftMask;
+
+          float density = (band * (0.52 + 0.78 * clouds) + halo * 0.30 + bulge * 0.90) * (1.0 - 0.72 * dust);
+          density *= smoothstep(0.06, 0.92, band + halo * 0.5);
+
+          vec3 colOuter = vec3(0.14, 0.22, 0.38);
+          vec3 colCore = vec3(0.42, 0.36, 0.31);
+          vec3 col = mix(colOuter, colCore, clamp(bulge * 0.85, 0.0, 1.0));
+          col *= density * 0.42 * vis;
+
+          if (dot(col, vec3(1.0)) < 0.001) discard;
+          col = dither8Bit(col, gl_FragCoord.xy);
+          gl_FragColor = vec4(col, clamp(density * 0.95 * vis, 0.0, 1.0));
+        }
+      `,
+    });
+
+    this._milkyWayMesh = new THREE.Mesh(geom, this._milkyWayMat);
+    this._milkyWayMesh.renderOrder = -2;
+    this._milkyWayMesh.frustumCulled = false;
+    this._milkyWayMesh.visible = this.showMilkyWay;
+    this.scene.add(this._milkyWayMesh);
+  }
+
+  _buildStarfieldLayer(stars) {
+    if (!Array.isArray(stars) || !stars.length) return;
+    if (this._starMesh) {
+      this.scene.remove(this._starMesh);
+      this._starMesh.geometry.dispose();
+      this._starMat.dispose();
+    }
+
+    const count = stars.length;
+    const positions = new Float32Array(count * 3);
+    const aRaDec = new Float32Array(count * 2);
+    const aMagBv = new Float32Array(count * 2);
+
+    for (let i = 0; i < count; i++) {
+      const [raDeg, decDeg, vmag, bv] = stars[i];
+      positions[i * 3] = 0;
+      positions[i * 3 + 1] = 0;
+      positions[i * 3 + 2] = 0;
+      aRaDec[i * 2] = raDeg;
+      aRaDec[i * 2 + 1] = decDeg;
+      aMagBv[i * 2] = vmag;
+      aMagBv[i * 2 + 1] = bv;
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('aRaDec', new THREE.BufferAttribute(aRaDec, 2));
+    geom.setAttribute('aMagBv', new THREE.BufferAttribute(aMagBv, 2));
+
+    this._starMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        uMorph: this._sharedUniforms.uMorph,
+        uRot: this._sharedUniforms.uRot,
+        uCamPos: this._sharedUniforms.uCamPos,
+        uResolution: this._sharedUniforms.uResolution,
+        uGmstRotLon: this._sharedUniforms.uGmstRotLon,
+        uDpr: this._sharedUniforms.uDpr,
+      },
+      vertexShader: /* glsl */ `
+        attribute vec2 aRaDec;
+        attribute vec2 aMagBv;
+        uniform float uMorph;
+        uniform vec2 uRot;
+        uniform vec3 uCamPos;
+        uniform vec2 uResolution;
+        uniform float uGmstRotLon;
+        uniform float uDpr;
+        varying float vAlpha;
+        varying vec3 vColor;
+
+        const float DEG2RAD = 0.017453292519943295;
+
+        vec3 bvToRgb(float bv) {
+          float t = clamp((bv + 0.35) / 2.25, 0.0, 1.0);
+          vec3 blue = vec3(0.68, 0.80, 1.00);
+          vec3 white = vec3(0.96, 0.97, 1.00);
+          vec3 gold = vec3(1.00, 0.87, 0.68);
+          vec3 orange = vec3(1.00, 0.68, 0.45);
+          if (t < 0.32) return mix(blue, white, t / 0.32);
+          if (t < 0.66) return mix(white, gold, (t - 0.32) / 0.34);
+          return mix(gold, orange, (t - 0.66) / 0.34);
+        }
+
+        void main() {
+          float phi = aRaDec.y * DEG2RAD;
+          float dLam = (aRaDec.x - uGmstRotLon) * DEG2RAD;
+          float cosPhi = cos(phi);
+          vec3 dLocal = vec3(cosPhi * sin(dLam), sin(phi), cosPhi * cos(dLam));
+
+          float phi0 = uRot.y * DEG2RAD;
+          float cosP0 = cos(phi0);
+          float sinP0 = sin(phi0);
+          vec3 dView = vec3(
+            dLocal.x,
+            dLocal.y * cosP0 - dLocal.z * sinP0,
+            dLocal.y * sinP0 + dLocal.z * cosP0
+          );
+
+          vec4 mvPos = modelViewMatrix * vec4(uCamPos + dView * 100.0, 1.0);
+          gl_Position = projectionMatrix * mvPos;
+
+          float mag = aMagBv.x;
+          float flux = pow(2.511886, clamp(1.5 - mag, -5.5, 3.0));
+          float resScale = max(0.85, (uResolution.y * uDpr) / 1080.0);
+
+          gl_PointSize = clamp((1.65 + 2.8 * clamp((6.5 - mag) / 7.5, 0.0, 1.0)) * resScale, 1.4, 8.5 * resScale);
+          vAlpha = clamp(0.24 + 0.78 * sqrt(flux * 0.68), 0.18, 0.98) * smoothstep(0.02, 0.35, uMorph);
+          vColor = bvToRgb(aMagBv.y);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying float vAlpha;
+        varying vec3 vColor;
+        void main() {
+          if (vAlpha < 0.01) discard;
+          vec2 uv = gl_PointCoord - 0.5;
+          float r2 = dot(uv, uv) * 4.0;
+          if (r2 > 1.0) discard;
+          float core = exp(-r2 * 4.2);
+          float halo = exp(-r2 * 1.6) * 0.35;
+          float intensity = (core + halo) * vAlpha;
+          gl_FragColor = vec4(vColor * intensity, intensity);
+        }
+      `,
+    });
+
+    this._starMesh = new THREE.Points(geom, this._starMat);
+    this._starMesh.renderOrder = -1;
+    this._starMesh.frustumCulled = false;
+    this._starMesh.visible = this.showStars;
+    this.scene.add(this._starMesh);
   }
 
   _buildAtmosphereGlow() {
@@ -1311,9 +1579,10 @@ export class SeismicMap {
 
   async loadGeoData() {
     try {
-      const [landRes, platesRes] = await Promise.all([
+      const [landRes, platesRes, starsRes] = await Promise.all([
         fetch('data/land-110m.geojson'),
         fetch('data/tectonic-plates.geojson'),
+        fetch('data/stars.json'),
       ]);
       if (landRes.ok) {
         const landJson = await landRes.json();
@@ -1325,6 +1594,10 @@ export class SeismicMap {
         this.plateFeatures = platesJson.features || [];
         this._buildPlateLayer();
       }
+      if (starsRes.ok) {
+        const stars = await starsRes.json();
+        this._buildStarfieldLayer(stars);
+      }
     } catch (err) {
       console.warn('Could not load local GeoJSON layers:', err);
     }
@@ -1334,6 +1607,20 @@ export class SeismicMap {
     this.showPlates = flag;
     if (this._plateMeshes) {
       for (const m of this._plateMeshes) m.visible = !!flag;
+    }
+  }
+
+  setShowStars(flag) {
+    this.showStars = !!flag;
+    if (this._starMesh) {
+      this._starMesh.visible = this.showStars;
+    }
+  }
+
+  setShowMilkyWay(flag) {
+    this.showMilkyWay = !!flag;
+    if (this._milkyWayMesh) {
+      this._milkyWayMesh.visible = this.showMilkyWay;
     }
   }
 
@@ -1575,6 +1862,7 @@ export class SeismicMap {
 
     this.renderer.setPixelRatio(this.dpr);
     this.renderer.setSize(this.width, this.height, false);
+    this._sharedUniforms.uDpr.value = this.dpr;
     this._sharedUniforms.uResolution.value.set(
       Math.max(1, this.width),
       Math.max(1, this.height)
@@ -2247,7 +2535,10 @@ export class SeismicMap {
     this._tileUniforms[2].uTileAlpha.value = sideTileAlpha;
 
     // Solar direction rotated into camera/globe-view space
-    const { lon: sunLon, lat: sunLat } = getSubsolarPoint(new Date(this.solarTimeMs));
+    const solarDate = new Date(this.solarTimeMs);
+    const { lon: sunLon, lat: sunLat } = getSubsolarPoint(solarDate);
+    const gmstDeg = getGMSTDeg(solarDate);
+    this._sharedUniforms.uGmstRotLon.value = gmstDeg + this.rotLon;
     const sPhi = sunLat * DEG2RAD;
     const sDLam = (sunLon - this.rotLon) * DEG2RAD;
     const sxa = Math.cos(sPhi) * Math.sin(sDLam);
@@ -2263,6 +2554,16 @@ export class SeismicMap {
     );
 
     this._updateCamera(m);
+
+    if (this._milkyWayMesh) {
+      this._milkyWayMesh.visible = this.showMilkyWay && m > 0.02;
+      if (this._milkyWayMesh.visible) {
+        this._milkyWayMesh.position.copy(this.camera.position);
+      }
+    }
+    if (this._starMesh) {
+      this._starMesh.visible = this.showStars && m > 0.02;
+    }
 
     // Position directional sun light beyond the camera, geosynced to true subsolar direction
     const sunDist = Math.max(25, this.camera.position.length() * 3);
