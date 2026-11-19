@@ -740,46 +740,118 @@ export class SeismicMap {
     };
 
     const geos = [];
-    const prevGeos = [];
-    const nextGeos = [];
-    const sides = [];
+    const acrossArr = [];
+    const alongArr = [];
+    const tArr = [];
+    const typeArr = [];
     const indices = [];
-    const rPlate = R_OCEAN + 0.0022;
     let vertOffset = 0;
+
+    const TYPE_CODE = {
+      subduction: 0,
+      divergent: 1,
+      transform: 2,
+      collision: 3,
+    };
+
+    const pushStrip = (pts, bType, overSideSign) => {
+      const n = pts.length;
+      if (n < 2) return;
+
+      const cumDist = new Float32Array(n);
+      for (let i = 1; i < n; i++) {
+        const cosLat = Math.max(0.2, Math.cos(((pts[i][1] + pts[i - 1][1]) * 0.5) * DEG2RAD));
+        const dl = (pts[i][0] - pts[i - 1][0]) * cosLat;
+        const dp = pts[i][1] - pts[i - 1][1];
+        cumDist[i] = cumDist[i - 1] + Math.hypot(dl, dp);
+      }
+      const totalDist = Math.max(cumDist[n - 1], 1e-4);
+
+      // Slim architectural profiles anchored on the blue ocean globe (R_OCEAN):
+      // Subduction: trench at R_OCEAN+0.003, overriding side rises gently to R_OCEAN+0.015
+      // Collision: uplifted ridge peaking at R_OCEAN+0.018 with skirts at R_OCEAN+0.002
+      // Divergent: recessed rift at R_OCEAN+0.002 with rims at R_OCEAN+0.006
+      // Transform: flush dashed shear line at R_OCEAN+0.003
+      let profile;
+      if (bType === 0) {
+        profile = [
+          [-0.18 * overSideSign, R_OCEAN + 0.002, -0.15],
+          [0.0, R_OCEAN + 0.003, 0.0],
+          [0.65 * overSideSign, R_OCEAN + 0.009, 0.5],
+          [1.3 * overSideSign, R_OCEAN + 0.015, 1.0],
+        ];
+      } else if (bType === 3) {
+        profile = [
+          [-0.32, R_OCEAN + 0.002, -1.0],
+          [0.0, R_OCEAN + 0.018, 0.0],
+          [0.32, R_OCEAN + 0.002, 1.0],
+        ];
+      } else if (bType === 1) {
+        profile = [
+          [-0.28, R_OCEAN + 0.006, -1.0],
+          [0.0, R_OCEAN + 0.002, 0.0],
+          [0.28, R_OCEAN + 0.006, 1.0],
+        ];
+      } else {
+        profile = [
+          [-0.24, R_OCEAN + 0.003, -1.0],
+          [0.0, R_OCEAN + 0.003, 0.0],
+          [0.24, R_OCEAN + 0.003, 1.0],
+        ];
+      }
+
+      const cols = profile.length;
+      for (let i = 0; i < n; i++) {
+        const p = pts[i];
+        const pPrev = pts[Math.max(0, i - 1)];
+        const pNext = pts[Math.min(n - 1, i + 1)];
+
+        const cosLat = Math.max(0.2, Math.cos(p[1] * DEG2RAD));
+        const tx = (pNext[0] - pPrev[0]) * cosLat;
+        const ty = pNext[1] - pPrev[1];
+        const tLen = Math.hypot(tx, ty) || 1;
+        const nLon = (-ty / tLen) / cosLat;
+        const nLat = tx / tLen;
+        const tNorm = cumDist[i] / totalDist;
+
+        for (let c = 0; c < cols; c++) {
+          const [offDeg, rad, across] = profile[c];
+          const lon = p[0] + nLon * offDeg;
+          const lat = Math.max(-89.5, Math.min(89.5, p[1] + nLat * offDeg));
+          geos.push(lon, lat, rad);
+          acrossArr.push(across);
+          alongArr.push(cumDist[i]);
+          tArr.push(tNorm);
+          typeArr.push(bType);
+        }
+
+        if (i < n - 1) {
+          const row0 = vertOffset + i * cols;
+          const row1 = row0 + cols;
+          for (let c = 0; c < cols - 1; c++) {
+            indices.push(row0 + c, row0 + c + 1, row1 + c);
+            indices.push(row0 + c + 1, row1 + c + 1, row1 + c);
+          }
+        }
+      }
+      vertOffset += n * cols;
+    };
 
     for (const feature of this.plateFeatures) {
       const geom = feature.geometry;
       if (!geom) continue;
+      const props = feature.properties || {};
+      const bType = TYPE_CODE[props.Type] ?? 2;
+      const overSideSign = props.OverridingSide === 'right' ? -1 : 1;
+
       const lines = geom.type === 'LineString' ? [geom.coordinates] : geom.coordinates;
       for (const line of lines) {
         const chains = splitAntimeridian(line);
         for (const rawChain of chains) {
-          const simplified = rdpSimplify(rawChain, 1.2);
+          const simplified = rdpSimplify(rawChain, 0.8);
           const smoothed = chaikinSmooth(simplified, 3);
-          const pts = subdivideChain(smoothed, 3.0);
-          if (pts.length < 2) continue;
-
-          for (let i = 0; i < pts.length; i++) {
-            const p = pts[i];
-            const pPrev = pts[Math.max(0, i - 1)];
-            const pNext = pts[Math.min(pts.length - 1, i + 1)];
-
-            for (const side of [-1, 1]) {
-              geos.push(p[0], p[1], rPlate);
-              prevGeos.push(pPrev[0], pPrev[1], rPlate);
-              nextGeos.push(pNext[0], pNext[1], rPlate);
-              sides.push(side);
-            }
-
-            if (i < pts.length - 1) {
-              const v0 = vertOffset + i * 2;
-              const v1 = v0 + 1;
-              const v2 = v0 + 2;
-              const v3 = v0 + 3;
-              indices.push(v0, v1, v2, v1, v3, v2);
-            }
-          }
-          vertOffset += pts.length * 2;
+          const pts = subdivideChain(smoothed, 2.5);
+          pushStrip(pts, bType, overSideSign);
         }
       }
     }
@@ -790,9 +862,10 @@ export class SeismicMap {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geom.setAttribute('aGeo', new THREE.Float32BufferAttribute(geos, 3));
-    geom.setAttribute('aPrevGeo', new THREE.Float32BufferAttribute(prevGeos, 3));
-    geom.setAttribute('aNextGeo', new THREE.Float32BufferAttribute(nextGeos, 3));
-    geom.setAttribute('aSide', new THREE.Float32BufferAttribute(sides, 1));
+    geom.setAttribute('aAcross', new THREE.Float32BufferAttribute(acrossArr, 1));
+    geom.setAttribute('aAlong', new THREE.Float32BufferAttribute(alongArr, 1));
+    geom.setAttribute('aT', new THREE.Float32BufferAttribute(tArr, 1));
+    geom.setAttribute('aType', new THREE.Float32BufferAttribute(typeArr, 1));
     geom.setIndex(indices);
 
     this._plateMeshes = [];
@@ -805,57 +878,77 @@ export class SeismicMap {
           uMorph: this._sharedUniforms.uMorph,
           uRot: this._sharedUniforms.uRot,
           uPan2D: this._sharedUniforms.uPan2D,
-          uResolution: this._sharedUniforms.uResolution,
-          uHalfWidthPx: { value: 1.75 },
           uTileOffsetX: this._tileUniforms[t].uTileOffsetX,
           uTileAlpha: this._tileUniforms[t].uTileAlpha,
         },
         vertexShader: /* glsl */ `
           attribute vec3 aGeo;
-          attribute vec3 aPrevGeo;
-          attribute vec3 aNextGeo;
-          attribute float aSide;
+          attribute float aAcross;
+          attribute float aAlong;
+          attribute float aT;
+          attribute float aType;
           uniform float uMorph;
           uniform float uTileOffsetX;
-          uniform float uHalfWidthPx;
           uniform vec2 uRot;
           uniform vec2 uPan2D;
-          uniform vec2 uResolution;
-          varying float vEdge;
+          varying float vAcross;
+          varying float vAlong;
+          varying float vT;
+          varying float vType;
           ${GLSL_MORPH_FN}
           void main() {
             vec3 p = geoToMorphPos(aGeo, uMorph, uTileOffsetX, uRot, uPan2D);
-            vec3 pPrev = geoToMorphPos(aPrevGeo, uMorph, uTileOffsetX, uRot, uPan2D);
-            vec3 pNext = geoToMorphPos(aNextGeo, uMorph, uTileOffsetX, uRot, uPan2D);
-
-            vec4 clip = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
-            vec4 clipPrev = projectionMatrix * modelViewMatrix * vec4(pPrev, 1.0);
-            vec4 clipNext = projectionMatrix * modelViewMatrix * vec4(pNext, 1.0);
-
-            vec2 ndc = clip.xy / max(abs(clip.w), 1e-4);
-            vec2 ndcPrev = clipPrev.xy / max(abs(clipPrev.w), 1e-4);
-            vec2 ndcNext = clipNext.xy / max(abs(clipNext.w), 1e-4);
-
-            vec2 dirPx = (ndcNext - ndcPrev) * uResolution * 0.5;
-            float dirLen = length(dirPx);
-            vec2 tangent = dirLen > 1e-4 ? dirPx / dirLen : vec2(1.0, 0.0);
-            vec2 normalPx = vec2(-tangent.y, tangent.x);
-
-            clip.xy += normalPx * aSide * uHalfWidthPx * (2.0 / uResolution) * clip.w;
-            vEdge = aSide;
-            gl_Position = clip;
+            vAcross = aAcross;
+            vAlong = aAlong;
+            vT = aT;
+            vType = aType;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
           }
         `,
         fragmentShader: /* glsl */ `
           uniform float uTileAlpha;
-          varying float vEdge;
+          varying float vAcross;
+          varying float vAlong;
+          varying float vT;
+          varying float vType;
           void main() {
             if (uTileAlpha < 0.01) discard;
-            float d = abs(vEdge);
-            float halo = smoothstep(1.0, 0.15, d);
-            float core = smoothstep(0.45, 0.0, d);
-            float alpha = (halo * 0.30 + core * 0.32) * uTileAlpha;
-            vec3 col = mix(vec3(1.0, 0.42, 0.21), vec3(1.0, 0.58, 0.34), core * 0.45);
+
+            float endFade = smoothstep(0.0, 0.05, vT) * smoothstep(1.0, 0.95, vT);
+            vec3 col;
+            float alpha;
+
+            if (vType < 0.5) {
+              // Subduction: crisp trench line + subtle translucent dipping slab veil
+              float trench = smoothstep(0.16, 0.0, abs(vAcross));
+              float slabMask = smoothstep(-0.05, 0.08, vAcross) * smoothstep(1.0, 0.08, vAcross);
+              vec3 trenchCol = vec3(0.92, 0.45, 0.98);
+              vec3 slabCol = vec3(0.54, 0.20, 0.86);
+              col = mix(slabCol, trenchCol, trench);
+              alpha = (slabMask * 0.16 * endFade + trench * 0.55) * uTileAlpha;
+            } else if (vType < 1.5) {
+              // Divergent: slim cyan-teal recessed line
+              float d = abs(vAcross);
+              float core = smoothstep(0.45, 0.0, d);
+              float halo = smoothstep(1.0, 0.2, d);
+              col = mix(vec3(0.12, 0.72, 0.72), vec3(0.45, 0.96, 0.90), core);
+              alpha = (halo * 0.14 + core * 0.48) * uTileAlpha;
+            } else if (vType < 2.5) {
+              // Transform: slim amber-gold dashed shear line
+              float d = abs(vAcross);
+              float core = smoothstep(0.6, 0.0, d);
+              float dash = smoothstep(0.3, 0.65, sin(vAlong * 3.6) * 0.5 + 0.5);
+              col = mix(vec3(0.86, 0.60, 0.14), vec3(1.0, 0.82, 0.36), core);
+              alpha = core * (0.14 + 0.44 * dash) * uTileAlpha;
+            } else {
+              // Collision: slim crimson-orange uplifted crest
+              float d = abs(vAcross);
+              float crest = smoothstep(0.42, 0.0, d);
+              float flank = smoothstep(1.0, 0.2, d);
+              col = mix(vec3(0.88, 0.26, 0.22), vec3(1.0, 0.56, 0.32), crest);
+              alpha = (flank * 0.14 + crest * 0.52) * uTileAlpha;
+            }
+
             gl_FragColor = vec4(col, alpha);
           }
         `,

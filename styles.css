@@ -705,6 +705,62 @@ input[type="range"]::-moz-range-thumb {
   padding: 2px 0;
 }
 
+.plate-legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px 8px;
+  margin-top: 6px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  transition: opacity 0.2s ease;
+}
+
+.panel-section:has(#toggle-plates:not(:checked)) .plate-legend {
+  opacity: 0.38;
+}
+
+.plate-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: #cbd5e1;
+  white-space: nowrap;
+}
+
+.plate-legend-item small {
+  color: #94a3b8;
+  font-size: 9.5px;
+}
+
+.plate-swatch {
+  width: 12px;
+  height: 4px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.plate-swatch--subduction {
+  background: linear-gradient(90deg, #e879f9, #8b5cf6);
+  box-shadow: 0 0 6px rgba(232, 121, 249, 0.65);
+}
+
+.plate-swatch--divergent {
+  background: #2dd4bf;
+  box-shadow: 0 0 6px rgba(45, 212, 191, 0.55);
+}
+
+.plate-swatch--transform {
+  background: repeating-linear-gradient(90deg, #fbbf24 0 5px, transparent 5px 8px);
+}
+
+.plate-swatch--collision {
+  background: #f97316;
+  box-shadow: 0 0 6px rgba(249, 115, 22, 0.6);
+}
+
 .switch {
   position: relative;
   display: inline-block;
